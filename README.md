@@ -245,7 +245,7 @@ https://my.feishu.cn/wiki/K5PzwchG3iU8gLk8eomcqGIUnDe
 
 ## Endgame
 
--[ ] The best is yet to come.
+- [ ] The best is yet to come.
 
 <img width="1366" height="84" alt="dc2c2e9fa7a4411411f4601c57c1a982" src="https://github.com/user-attachments/assets/d066ef63-24c4-4321-afa6-ceeea3e43d19" />
 

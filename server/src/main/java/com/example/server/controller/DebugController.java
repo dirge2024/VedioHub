@@ -51,10 +51,14 @@ public class DebugController {
 
     //AI总结接口(分布式锁 + 限流 + MQ)
     @GetMapping("/ai")
-    public String aiAnalyze(@RequestParam Long id) {
+    public String aiAnalyze(@RequestParam Long id,
+                            @RequestParam(defaultValue = "理解视频核心内容并生成结构化分析报告") String goal) {
         String activeKey = null;
 
         try {
+            if (goal.isBlank() || goal.length() > 500) {
+                return "❌ 分析目标不能为空且不能超过 500 字";
+            }
             // 这里演示：全局限制每分钟只能分析 10 次 (防止费用爆炸)
             String limitKey = "limit:ai:global";
             org.redisson.api.RRateLimiter rateLimiter = redissonClient.getRateLimiter(limitKey);
@@ -91,7 +95,7 @@ public class DebugController {
             redisTemplate.delete("media:list:user:" + userIdKey);
 
             //发送消息
-            AnalysisTaskMsg msg = new AnalysisTaskMsg(id, "START_ANALYSIS", contentHash);
+            AnalysisTaskMsg msg = new AnalysisTaskMsg(id, "START_ANALYSIS", contentHash, goal);
             rocketMQTemplate.convertAndSend("video-analysis-topic", msg);
 
             return "✅ 任务已投递至 RocketMQ！";

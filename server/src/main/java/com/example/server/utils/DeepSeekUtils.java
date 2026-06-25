@@ -1,5 +1,6 @@
 package com.example.server.utils;
 
+import com.example.server.dto.AgentState;
 import com.example.server.dto.AnalysisResult;
 import com.example.server.dto.VideoContext;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -52,14 +53,35 @@ public class DeepSeekUtils {
         return chatModel.chat(SYSTEM_PROMPT + "\n\n待分析文本：\n" + content);
     }
 
-    public AnalysisResult analyzeVideoContext(VideoContext context) {
+    public AgentState.AgentPlan plan(VideoContext context) {
         try {
             String prompt = """
-                    你是 Video Agent。请根据用户提供的时序视频上下文完成分析。
-                    语音 transcript、画面 OCR 和 evidenceFrames 均按时间段对齐。
-                    每个结论必须引用上下文中的时间戳证据，不得编造视频中不存在的信息。
+                    你是 Video Agent 的 Planner。理解用户目标，并拆成 3 到 5 个可执行任务。
+                    任务必须能够仅依靠 VideoContext 中的 ASR、OCR 和时间戳证据完成。
+                    只返回 JSON：
+                    {
+                      "understoodGoal": "对用户目标的明确理解",
+                      "tasks": ["任务1", "任务2", "任务3"]
+                    }
+                    VideoContext:
+                    """ + objectMapper.writeValueAsString(context);
+            return parseJson(chatModel.chat(prompt), AgentState.AgentPlan.class);
+        } catch (Exception e) {
+            throw new IllegalStateException("Agent 任务规划失败", e);
+        }
+    }
 
-                    只返回 JSON，不要 Markdown，不要代码块。结构必须为：
+    public AnalysisResult execute(VideoContext context,
+                                  AgentState.AgentPlan plan,
+                                  AgentState.CriticResult previousCritique) {
+        try {
+            String prompt = """
+                    你是 Video Agent 的 Executor。按照计划分析 VideoContext 并生成结构化产物。
+                    所有重要结论必须绑定真实 timestampMs，并标明来源为 ASR 或 OCR。
+                    不得使用视频上下文之外的事实。
+                    如果存在 Critic 反馈，必须逐项修正。
+
+                    只返回 JSON：
                     {
                       "title": "产物标题",
                       "conclusions": ["结论"],
@@ -69,16 +91,62 @@ public class DeepSeekUtils {
                       "suggestions": ["建议"]
                     }
 
+                    Plan:
+                    """ + objectMapper.writeValueAsString(plan) + """
+
+                    PreviousCritique:
+                    """ + objectMapper.writeValueAsString(previousCritique) + """
+
                     VideoContext:
                     """ + objectMapper.writeValueAsString(context);
-
-            String json = chatModel.chat(prompt)
-                    .replace("```json", "")
-                    .replace("```", "")
-                    .trim();
-            return objectMapper.readValue(json, AnalysisResult.class);
+            return parseJson(chatModel.chat(prompt), AnalysisResult.class);
         } catch (Exception e) {
-            throw new IllegalStateException("结构化视频分析失败", e);
+            throw new IllegalStateException("Agent 执行失败", e);
         }
+    }
+
+    public AgentState.CriticResult critique(VideoContext context,
+                                            AgentState.AgentPlan plan,
+                                            AnalysisResult result) {
+        try {
+            String prompt = """
+                    你是 Video Agent 的 Critic，只负责检查，不负责改写产物。
+                    检查标准：
+                    1. 是否覆盖用户目标和 Planner 的全部任务；
+                    2. 每个重要结论是否能在 VideoContext 中找到时间戳证据；
+                    3. 是否存在上下文不支持的结论；
+                    4. title、conclusions、evidence、suggestions 是否完整。
+
+                    只有全部满足时 passed 才能为 true。
+                    requiredTimestamps 填写需要重新读取或补充分析的时间戳毫秒值。
+                    只返回 JSON：
+                    {
+                      "passed": false,
+                      "feedback": ["具体修改建议"],
+                      "missingRequirements": ["遗漏要求"],
+                      "unsupportedClaims": ["无证据结论"],
+                      "requiredTimestamps": [120000]
+                    }
+
+                    Plan:
+                    """ + objectMapper.writeValueAsString(plan) + """
+
+                    Draft:
+                    """ + objectMapper.writeValueAsString(result) + """
+
+                    VideoContext:
+                    """ + objectMapper.writeValueAsString(context);
+            return parseJson(chatModel.chat(prompt), AgentState.CriticResult.class);
+        } catch (Exception e) {
+            throw new IllegalStateException("Critic 校验失败", e);
+        }
+    }
+
+    private <T> T parseJson(String response, Class<T> type) throws Exception {
+        String json = response
+                .replace("```json", "")
+                .replace("```", "")
+                .trim();
+        return objectMapper.readValue(json, type);
     }
 }

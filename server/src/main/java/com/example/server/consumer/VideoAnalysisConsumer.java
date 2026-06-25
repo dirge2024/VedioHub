@@ -60,7 +60,7 @@ public class VideoAnalysisConsumer implements RocketMQListener<AnalysisTaskMsg> 
                     System.out.println("相同视频正在处理中，跳过重复消息: " + mediaId);
                     return;
                 }
-                aiService.asyncAnalyze(mediaId);
+                aiService.asyncAnalyze(mediaId, msg.getUserGoal());
             } catch (Exception e) {
                 System.err.println("❌ 任务执行失败: " + e.getMessage());
                 markAsFailed(mediaId, e.getMessage());

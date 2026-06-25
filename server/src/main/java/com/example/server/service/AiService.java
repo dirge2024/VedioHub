@@ -1,11 +1,10 @@
 package com.example.server.service;
 
-import com.example.server.dto.AnalysisResult;
+import com.example.server.dto.AgentState;
 import com.example.server.dto.VideoContext;
 import com.example.server.entity.MediaFile;
 import com.example.server.mapper.MediaFileMapper;
 import com.example.server.strategy.AiAnalysisStrategy;
-import com.example.server.utils.DeepSeekUtils;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.data.redis.core.StringRedisTemplate;
@@ -30,9 +29,9 @@ public class AiService {
     private VideoContextService videoContextService;
 
     @Autowired
-    private DeepSeekUtils deepSeekUtils;
+    private AgentLoopService agentLoopService;
 
-    public void asyncAnalyze(Long mediaId) {
+    public void asyncAnalyze(Long mediaId, String userGoal) {
         System.out.println(" [线程池] 开始处理任务，ID: " + mediaId);
 
         MediaFile mediaFile = mediaFileMapper.selectById(mediaId);
@@ -40,12 +39,12 @@ public class AiService {
 
         try {
             // ASR + 场景关键帧 OCR 按时间轴合并为统一上下文
-            VideoContext videoContext = videoContextService.build(mediaFile.getFilePath());
+            VideoContext videoContext = videoContextService.build(mediaFile.getFilePath(), userGoal);
             mediaFile.setTranscriptText(videoContext.transcriptText());
 
-            // Agent 消费 VideoContext，并输出固定字段的结构化产物
-            AnalysisResult analysisResult = deepSeekUtils.analyzeVideoContext(videoContext);
-            mediaFile.setAiSummary(analysisResult.toMarkdown());
+            // Planner -> Executor -> Critic，最多两轮后强制结束
+            AgentState agentState = agentLoopService.run(videoContext);
+            mediaFile.setAiSummary(agentState.result().toMarkdown());
 
             // 3. 保存数据库 (这一步你已经成功了)
             mediaFileMapper.updateById(mediaFile);

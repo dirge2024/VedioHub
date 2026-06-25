@@ -32,13 +32,13 @@ public class VideoContextService {
     @Autowired
     private OcrUtils ocrUtils;
 
-    public VideoContext build(String videoPath) {
+    public VideoContext build(String videoPath, String userGoal) {
         Path workDir = Path.of(System.getProperty("java.io.tmpdir"), "video-context-" + UUID.randomUUID());
         try {
             Files.createDirectories(workDir);
             List<TranscriptPart> transcripts = transcribeBySegments(videoPath, workDir.resolve("audio"));
             List<FramePart> frames = extractKeyFrames(videoPath, workDir.resolve("frames"));
-            return new VideoContext(videoPath, merge(transcripts, frames));
+            return new VideoContext(videoPath, userGoal, merge(transcripts, frames));
         } catch (Exception e) {
             throw new IllegalStateException("VideoContext 构建失败", e);
         } finally {

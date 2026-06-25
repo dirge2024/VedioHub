@@ -7,13 +7,15 @@ public class AnalysisTaskMsg implements Serializable {
     private Long mediaId;
     private String action; //例如"START_ANALYSIS"
     private String contentHash;
+    private String userGoal;
 
     public AnalysisTaskMsg() {}
 
-    public AnalysisTaskMsg(Long mediaId, String action, String contentHash) {
+    public AnalysisTaskMsg(Long mediaId, String action, String contentHash, String userGoal) {
         this.mediaId = mediaId;
         this.action = action;
         this.contentHash = contentHash;
+        this.userGoal = userGoal;
     }
 
     public Long getMediaId() { return mediaId; }
@@ -22,4 +24,6 @@ public class AnalysisTaskMsg implements Serializable {
     public void setAction(String action) { this.action = action; }
     public String getContentHash() { return contentHash; }
     public void setContentHash(String contentHash) { this.contentHash = contentHash; }
+    public String getUserGoal() { return userGoal; }
+    public void setUserGoal(String userGoal) { this.userGoal = userGoal; }
 }

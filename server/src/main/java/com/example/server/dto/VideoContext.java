@@ -7,6 +7,7 @@ import java.util.List;
  */
 public record VideoContext(
         String source,
+        String userGoal,
         List<VideoSegment> segments
 ) {
     public record VideoSegment(

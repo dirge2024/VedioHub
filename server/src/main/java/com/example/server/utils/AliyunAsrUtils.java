@@ -62,9 +62,10 @@ public class AliyunAsrUtils {
                         lastError = "HTTP " + response.code() + ": " + errBody;
                         System.err.println("⚠️ ASR 失败 (" + (i + 1) + "/" + maxRetries + "): " + lastError);
 
-                        // 遇到 500/502/503 等服务端错误，等待 2 秒再重试
                         if (response.code() >= 500) {
-                            Thread.sleep(2000);
+                            if (i < maxRetries - 1 && !waitBeforeRetry(i)) {
+                                return "❌ 识别任务已中断";
+                            }
                             continue;
                         } else {
                             // 如果是 400/401 等客户端错误，直接退出不重试
@@ -75,9 +76,26 @@ public class AliyunAsrUtils {
             } catch (Exception e) {
                 lastError = e.getMessage();
                 System.err.println("⚠️ 网络异常 (" + (i + 1) + "/" + maxRetries + "): " + lastError);
+                if (i < maxRetries - 1 && !waitBeforeRetry(i)) {
+                    return "❌ 识别任务已中断";
+                }
             }
         }
 
         return "❌ 最终失败 (重试3次): " + lastError;
+    }
+
+    private boolean waitBeforeRetry(int attempt) {
+        try {
+            Thread.sleep(retryDelayMillis(attempt));
+            return true;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return false;
+        }
+    }
+
+    static long retryDelayMillis(int attempt) {
+        return 2000L * (1L << attempt);
     }
 }

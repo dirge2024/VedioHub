@@ -17,6 +17,7 @@ import org.springframework.web.multipart.MultipartFile;
 import java.io.File;
 import java.time.LocalDateTime;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.TimeUnit;
 
 @RestController
@@ -43,9 +44,56 @@ public class MediaController {
     private MediaService mediaService;
 
     @PostMapping("/init-upload")
-    public ResponseEntity<String> initUpload() {
-        String uploadId = mediaService.initChunkedUpload();
-        return ResponseEntity.ok(uploadId);
+    public ResponseEntity<String> initUpload(@RequestParam String filename,
+                                             @RequestParam int totalChunks,
+                                             @RequestParam(value = "userId", required = false) Long userId) {
+        try {
+            return ResponseEntity.ok(mediaService.initChunkedUpload(filename, totalChunks, userId));
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().body(e.getMessage());
+        } catch (Exception e) {
+            e.printStackTrace();
+            return ResponseEntity.status(500).body("Failed to initialize upload");
+        }
+    }
+
+    @GetMapping("/upload-status")
+    public ResponseEntity<?> uploadStatus(@RequestParam String uploadId) {
+        try {
+            Set<Integer> uploadedChunks = mediaService.getUploadedChunks(uploadId);
+            return ResponseEntity.ok(uploadedChunks);
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().body(e.getMessage());
+        }
+    }
+
+    @PostMapping("/upload-chunk")
+    public ResponseEntity<String> uploadChunk(@RequestParam String uploadId,
+                                              @RequestParam int chunkIndex,
+                                              @RequestParam int totalChunks,
+                                              @RequestParam("file") MultipartFile file) {
+        try {
+            mediaService.uploadChunk(uploadId, chunkIndex, totalChunks, file);
+            return ResponseEntity.ok("Chunk uploaded");
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().body(e.getMessage());
+        } catch (Exception e) {
+            e.printStackTrace();
+            return ResponseEntity.status(500).body("Chunk upload failed");
+        }
+    }
+
+    @PostMapping("/complete-upload")
+    public ResponseEntity<String> completeUpload(@RequestParam String uploadId) {
+        try {
+            mediaService.completeChunkedUpload(uploadId);
+            return ResponseEntity.ok("Upload success");
+        } catch (IllegalArgumentException | IllegalStateException e) {
+            return ResponseEntity.badRequest().body(e.getMessage());
+        } catch (Exception e) {
+            e.printStackTrace();
+            return ResponseEntity.status(500).body("Upload merge failed");
+        }
     }
 
 
@@ -59,6 +107,7 @@ public class MediaController {
             return ResponseEntity.status(500).body("Upload failed: database not ready");
         }
         try {
+            String md5 = mediaService.calculateMd5(file);
             System.out.println("Uploading to MinIO...");
             String fileUrl = minioUtils.uploadFile(file);
             System.out.println("MinIO upload success, url: " + fileUrl);
@@ -74,6 +123,7 @@ public class MediaController {
             }
 
             mediaFileMapper.insert(mediaFile);
+            mediaService.rememberContentHash(mediaFile.getId(), md5);
 
             if (userId != null) {
                 String cacheKey = "media:list:user:" + userId;
@@ -104,6 +154,7 @@ public class MediaController {
 
             tempFile = ytDlpUtils.downloadVideo(url);
 
+            String md5 = mediaService.calculateMd5(tempFile);
             String fileUrl = minioUtils.uploadLocalFile(tempFile);
 
             MediaFile mediaFile = new MediaFile();
@@ -117,6 +168,7 @@ public class MediaController {
             }
 
             mediaFileMapper.insert(mediaFile);
+            mediaService.rememberContentHash(mediaFile.getId(), md5);
 
             if (userId != null) {
                 String cacheKey = "media:list:user:" + userId;

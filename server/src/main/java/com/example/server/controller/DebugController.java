@@ -52,16 +52,9 @@ public class DebugController {
     //AI总结接口(分布式锁 + 限流 + MQ)
     @GetMapping("/ai")
     public String aiAnalyze(@RequestParam Long id) {
-        //【Redisson 分布式锁】防瞬时并发连点
-        String lockKey = "lock:analyze:" + id;
-        org.redisson.api.RLock lock = redissonClient.getLock(lockKey);
+        String activeKey = null;
 
         try {
-            if (!lock.tryLock(0, -1, TimeUnit.SECONDS)) {
-                return "⚠️ 任务提交中，请勿重复点击！";
-            }
-
-
             // 这里演示：全局限制每分钟只能分析 10 次 (防止费用爆炸)
             String limitKey = "limit:ai:global";
             org.redisson.api.RRateLimiter rateLimiter = redissonClient.getRateLimiter(limitKey);
@@ -80,6 +73,17 @@ public class DebugController {
                 return "任务已在后台运行，无需重复提交";
             }
 
+            String contentHash = redisTemplate.opsForValue().get("media:md5:" + id);
+            if (contentHash == null || !contentHash.matches("[a-f0-9]{32}")) {
+                contentHash = "media-" + id;
+            }
+            activeKey = "analysis:active:" + contentHash;
+            Boolean accepted = redisTemplate.opsForValue()
+                    .setIfAbsent(activeKey, String.valueOf(id), 2, TimeUnit.HOURS);
+            if (!Boolean.TRUE.equals(accepted)) {
+                return "⚠️ 相同视频正在分析，请勿重复提交！";
+            }
+
             //更新状态
             file.setAiSummary("[MQ] 已进入消息队列，等待调度...");
             mediaFileMapper.updateById(file);
@@ -87,18 +91,17 @@ public class DebugController {
             redisTemplate.delete("media:list:user:" + userIdKey);
 
             //发送消息
-            AnalysisTaskMsg msg = new AnalysisTaskMsg(id, "START_ANALYSIS");
+            AnalysisTaskMsg msg = new AnalysisTaskMsg(id, "START_ANALYSIS", contentHash);
             rocketMQTemplate.convertAndSend("video-analysis-topic", msg);
 
             return "✅ 任务已投递至 RocketMQ！";
 
         } catch (Exception e) {
             e.printStackTrace();
-            return "❌ 提交失败: " + e.getMessage();
-        } finally {
-            if (lock.isHeldByCurrentThread()) {
-                lock.unlock();
+            if (activeKey != null) {
+                redisTemplate.delete(activeKey);
             }
+            return "❌ 提交失败: " + e.getMessage();
         }
     }
 

@@ -67,6 +67,7 @@ public class AiService {
             // 失败也要删缓存，否则前端会一直转圈看不到“失败”两个字
             String userIdStr = (mediaFile.getUserId() == null) ? "anon" : String.valueOf(mediaFile.getUserId());
             redisTemplate.delete("media:list:user:" + userIdStr);
+            throw new IllegalStateException("AI analysis failed", e);
         }
     }
 

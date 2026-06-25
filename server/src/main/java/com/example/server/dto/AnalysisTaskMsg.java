@@ -6,16 +6,20 @@ import java.io.Serializable;
 public class AnalysisTaskMsg implements Serializable {
     private Long mediaId;
     private String action; //例如"START_ANALYSIS"
+    private String contentHash;
 
     public AnalysisTaskMsg() {}
 
-    public AnalysisTaskMsg(Long mediaId, String action) {
+    public AnalysisTaskMsg(Long mediaId, String action, String contentHash) {
         this.mediaId = mediaId;
         this.action = action;
+        this.contentHash = contentHash;
     }
 
     public Long getMediaId() { return mediaId; }
     public void setMediaId(Long mediaId) { this.mediaId = mediaId; }
     public String getAction() { return action; }
     public void setAction(String action) { this.action = action; }
+    public String getContentHash() { return contentHash; }
+    public void setContentHash(String contentHash) { this.contentHash = contentHash; }
 }

@@ -296,23 +296,65 @@ const handleDrop = async (e) => {
   await uploadFile()
 }
 
-// 【普通文件上传】
+const CHUNK_SIZE = 5 * 1024 * 1024
+
 const uploadFile = async () => {
   if (!file.value) return
   uploading.value = true
-  message.value = '正在建立加密通道并上传数据...'
-  const formData = new FormData()
-  formData.append('file', file.value)
-  if (currentUser.value) formData.append('userId', currentUser.value.id)
+  const selectedFile = file.value
+  const totalChunks = Math.ceil(selectedFile.size / CHUNK_SIZE)
+  const storageKey = `upload:${selectedFile.name}:${selectedFile.size}:${selectedFile.lastModified}`
 
   try {
-    const res = await fetch('http://localhost:9090/media/upload', {
-      method: 'POST',
-      body: formData
-    })
-    const text = await res.text()
-    if (!res.ok) throw new Error(text || 'Upload failed')
+    let uploadId = localStorage.getItem(storageKey)
+    let uploadedChunks = new Set()
 
+    if (uploadId) {
+      const statusRes = await fetch(`http://localhost:9090/media/upload-status?uploadId=${encodeURIComponent(uploadId)}`)
+      if (statusRes.ok) {
+        uploadedChunks = new Set(await statusRes.json())
+      } else {
+        localStorage.removeItem(storageKey)
+        uploadId = null
+      }
+    }
+
+    if (!uploadId) {
+      const params = new URLSearchParams({
+        filename: selectedFile.name,
+        totalChunks: String(totalChunks),
+        userId: String(currentUser.value.id)
+      })
+      const initRes = await fetch(`http://localhost:9090/media/init-upload?${params}`, { method: 'POST' })
+      const initText = await initRes.text()
+      if (!initRes.ok) throw new Error(initText || 'Failed to initialize upload')
+      uploadId = initText
+      localStorage.setItem(storageKey, uploadId)
+    }
+
+    for (let index = 0; index < totalChunks; index++) {
+      if (uploadedChunks.has(index)) continue
+
+      message.value = `正在上传分片 ${index + 1}/${totalChunks}...`
+      const formData = new FormData()
+      formData.append('uploadId', uploadId)
+      formData.append('chunkIndex', String(index))
+      formData.append('totalChunks', String(totalChunks))
+      formData.append('file', selectedFile.slice(index * CHUNK_SIZE, Math.min(selectedFile.size, (index + 1) * CHUNK_SIZE)))
+
+      const chunkRes = await fetch('http://localhost:9090/media/upload-chunk', {
+        method: 'POST',
+        body: formData
+      })
+      if (!chunkRes.ok) throw new Error(await chunkRes.text() || `Chunk ${index} failed`)
+    }
+
+    message.value = '分片上传完成，正在合并文件...'
+    const completeParams = new URLSearchParams({ uploadId })
+    const completeRes = await fetch(`http://localhost:9090/media/complete-upload?${completeParams}`, { method: 'POST' })
+    if (!completeRes.ok) throw new Error(await completeRes.text() || 'Upload merge failed')
+
+    localStorage.removeItem(storageKey)
     showMsg('✅ 本地上传完成')
     fetchList()
   } catch (error) {

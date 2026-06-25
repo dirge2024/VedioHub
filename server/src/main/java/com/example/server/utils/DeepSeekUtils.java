@@ -2,12 +2,15 @@ package com.example.server.utils;
 
 import com.example.server.dto.AgentState;
 import com.example.server.dto.AnalysisResult;
+import com.example.server.dto.VideoChunk;
 import com.example.server.dto.VideoContext;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.langchain4j.model.chat.ChatModel;
 import dev.langchain4j.model.openai.OpenAiChatModel;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
+
+import java.util.List;
 
 @Component
 public class DeepSeekUtils {
@@ -68,6 +71,23 @@ public class DeepSeekUtils {
             return parseJson(chatModel.chat(prompt), AgentState.AgentPlan.class);
         } catch (Exception e) {
             throw new IllegalStateException("Agent 任务规划失败", e);
+        }
+    }
+
+    public VideoChunk.ChunkSummary summarizeChunk(List<VideoContext.VideoSegment> segments) {
+        try {
+            String prompt = """
+                    压缩以下五分钟视频片段，保留人物、事件、观点、结论以及重要 OCR 信息。
+                    只返回 JSON：
+                    {
+                      "segmentSummary": "不超过 200 字的片段摘要",
+                      "keywords": ["关键词1", "关键词2", "关键词3"]
+                    }
+                    原始片段：
+                    """ + objectMapper.writeValueAsString(segments);
+            return parseJson(chatModel.chat(prompt), VideoChunk.ChunkSummary.class);
+        } catch (Exception e) {
+            throw new IllegalStateException("视频片段摘要失败", e);
         }
     }
 

@@ -15,14 +15,18 @@ public class AgentLoopService {
     @Autowired
     private DeepSeekUtils deepSeekUtils;
 
+    @Autowired
+    private LongVideoContextService longVideoContextService;
+
     public AgentState run(VideoContext context) {
-        AgentState.AgentPlan plan = deepSeekUtils.plan(context);
-        AgentState state = new AgentState(context.userGoal(), plan, null, null, 0);
+        VideoContext relevantContext = longVideoContextService.selectRelevant(context);
+        AgentState.AgentPlan plan = deepSeekUtils.plan(relevantContext);
+        AgentState state = new AgentState(relevantContext.userGoal(), plan, null, null, 0);
 
         for (int round = 1; round <= MAX_ROUNDS; round++) {
-            AnalysisResult result = deepSeekUtils.execute(context, plan, state.critique());
-            AgentState.CriticResult critique = deepSeekUtils.critique(context, plan, result);
-            state = new AgentState(context.userGoal(), plan, result, critique, round);
+            AnalysisResult result = deepSeekUtils.execute(relevantContext, plan, state.critique());
+            AgentState.CriticResult critique = deepSeekUtils.critique(relevantContext, plan, result);
+            state = new AgentState(relevantContext.userGoal(), plan, result, critique, round);
 
             if (critique.passed()) {
                 break;

@@ -46,6 +46,7 @@ public class VideoAnalysisConsumer implements RocketMQListener<AnalysisTaskMsg> 
         }
         String lockKey = "lock:analysis:" + contentHash;
         String activeKey = "analysis:active:" + contentHash;
+        String completedKey = "analysis:completed:" + mediaId;
         System.out.println("⚡ [MQ消费者] 收到任务 ID: " + mediaId + "，准备派发给线程池...");
 
         //CompletableFuture异步编排
@@ -60,7 +61,12 @@ public class VideoAnalysisConsumer implements RocketMQListener<AnalysisTaskMsg> 
                     System.out.println("相同视频正在处理中，跳过重复消息: " + mediaId);
                     return;
                 }
+                if (Boolean.TRUE.equals(redisTemplate.hasKey(completedKey))) {
+                    System.out.println("任务已经完成，跳过重复消费: " + mediaId);
+                    return;
+                }
                 aiService.asyncAnalyze(mediaId, msg.getUserGoal());
+                redisTemplate.opsForValue().set(completedKey, "1");
             } catch (Exception e) {
                 System.err.println("❌ 任务执行失败: " + e.getMessage());
                 markAsFailed(mediaId, e.getMessage());

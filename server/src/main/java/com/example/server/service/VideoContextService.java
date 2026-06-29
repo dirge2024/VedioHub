@@ -16,6 +16,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -36,8 +37,22 @@ public class VideoContextService {
         Path workDir = Path.of(System.getProperty("java.io.tmpdir"), "video-context-" + UUID.randomUUID());
         try {
             Files.createDirectories(workDir);
-            List<TranscriptPart> transcripts = transcribeBySegments(videoPath, workDir.resolve("audio"));
-            List<FramePart> frames = extractKeyFrames(videoPath, workDir.resolve("frames"));
+            CompletableFuture<List<TranscriptPart>> transcriptFuture = CompletableFuture.supplyAsync(() -> {
+                try {
+                    return transcribeBySegments(videoPath, workDir.resolve("audio"));
+                } catch (Exception e) {
+                    throw new IllegalStateException(e);
+                }
+            });
+            CompletableFuture<List<FramePart>> frameFuture = CompletableFuture.supplyAsync(() -> {
+                try {
+                    return extractKeyFrames(videoPath, workDir.resolve("frames"));
+                } catch (Exception e) {
+                    throw new IllegalStateException(e);
+                }
+            });
+            List<TranscriptPart> transcripts = transcriptFuture.join();
+            List<FramePart> frames = frameFuture.join();
             return new VideoContext(videoPath, userGoal, merge(transcripts, frames));
         } catch (Exception e) {
             throw new IllegalStateException("VideoContext 构建失败", e);

@@ -34,7 +34,8 @@ public class LongVideoContextService {
 
         List<VideoContext.VideoSegment> selectedSegments = chunks.stream()
                 .sorted(Comparator.comparingDouble(
-                        (VideoChunk chunk) -> cosine(queryEmbedding, chunk.embedding())
+                        (VideoChunk chunk) -> hybridScore(
+                                context.userGoal(), queryEmbedding, chunk)
                 ).reversed())
                 .limit(TOP_K)
                 .flatMap(chunk -> chunk.rawSegments().stream())
@@ -66,6 +67,15 @@ public class LongVideoContextService {
             ));
         }
         return chunks;
+    }
+
+    private double hybridScore(String goal, List<Double> queryEmbedding, VideoChunk chunk) {
+        // ponytail: 轻量关键词命中，数据量扩大后再升级分词器或 Reranker。
+        long matched = chunk.keywords().stream()
+                .filter(keyword -> goal != null && goal.contains(keyword))
+                .count();
+        double keywordScore = chunk.keywords().isEmpty() ? 0 : (double) matched / chunk.keywords().size();
+        return cosine(queryEmbedding, chunk.embedding()) * 0.7 + keywordScore * 0.3;
     }
 
     private double cosine(List<Double> left, List<Double> right) {

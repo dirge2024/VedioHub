@@ -31,6 +31,9 @@ public class AiService {
     @Autowired
     private AgentLoopService agentLoopService;
 
+    @Autowired
+    private AgentCheckpointService checkpointService;
+
     public void asyncAnalyze(Long mediaId, String userGoal) {
         System.out.println(" [线程池] 开始处理任务，ID: " + mediaId);
 
@@ -38,12 +41,24 @@ public class AiService {
         if (mediaFile == null) return;
 
         try {
+            AgentState agentState = checkpointService.loadResult(mediaId);
+            if (agentState != null) {
+                mediaFile.setAiSummary(agentState.result().toMarkdown());
+                mediaFileMapper.updateById(mediaFile);
+                return;
+            }
+
             // ASR + 场景关键帧 OCR 按时间轴合并为统一上下文
-            VideoContext videoContext = videoContextService.build(mediaFile.getFilePath(), userGoal);
+            VideoContext videoContext = checkpointService.loadContext(mediaId);
+            if (videoContext == null) {
+                videoContext = videoContextService.build(mediaFile.getFilePath(), userGoal);
+                checkpointService.saveContext(mediaId, videoContext);
+            }
             mediaFile.setTranscriptText(videoContext.transcriptText());
 
             // Planner -> Executor -> Critic，最多两轮后强制结束
-            AgentState agentState = agentLoopService.run(videoContext);
+            agentState = agentLoopService.run(videoContext);
+            checkpointService.saveResult(mediaId, agentState);
             mediaFile.setAiSummary(agentState.result().toMarkdown());
 
             // 3. 保存数据库 (这一步你已经成功了)

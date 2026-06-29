@@ -121,6 +121,14 @@ public class DebugController {
         return "✅ 提取任务已后台运行！请稍后查看结果。";
     }
 
+    @GetMapping("/follow-up")
+    public String followUp(@RequestParam Long id, @RequestParam String question) {
+        if (question.isBlank() || question.length() > 500) {
+            return "追问内容不能为空且不能超过 500 字";
+        }
+        return aiService.followUp(id, question);
+    }
+
     //下载音频接口
     @GetMapping("/download")
     public ResponseEntity<Resource> download(@RequestParam Long id) throws IOException {

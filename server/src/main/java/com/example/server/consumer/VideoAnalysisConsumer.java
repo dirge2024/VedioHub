@@ -46,7 +46,8 @@ public class VideoAnalysisConsumer implements RocketMQListener<AnalysisTaskMsg> 
         }
         String lockKey = "lock:analysis:" + contentHash;
         String activeKey = "analysis:active:" + contentHash;
-        String completedKey = "analysis:completed:" + mediaId;
+        String completedKey = "analysis:completed:" + mediaId + ":"
+                + Integer.toHexString(String.valueOf(msg.getUserGoal()).hashCode());
         System.out.println("⚡ [MQ消费者] 收到任务 ID: " + mediaId + "，准备派发给线程池...");
 
         //CompletableFuture异步编排

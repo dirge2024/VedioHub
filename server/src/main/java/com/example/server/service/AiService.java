@@ -41,7 +41,7 @@ public class AiService {
         if (mediaFile == null) return;
 
         try {
-            AgentState agentState = checkpointService.loadResult(mediaId);
+            AgentState agentState = checkpointService.loadResult(mediaId, userGoal);
             if (agentState != null) {
                 mediaFile.setAiSummary(agentState.result().toMarkdown());
                 mediaFileMapper.updateById(mediaFile);
@@ -53,12 +53,13 @@ public class AiService {
             if (videoContext == null) {
                 videoContext = videoContextService.build(mediaFile.getFilePath(), userGoal);
                 checkpointService.saveContext(mediaId, videoContext);
+            } else {
+                videoContext = new VideoContext(videoContext.source(), userGoal, videoContext.segments());
             }
             mediaFile.setTranscriptText(videoContext.transcriptText());
 
             // Planner -> Executor -> Critic，最多两轮后强制结束
-            agentState = agentLoopService.run(videoContext);
-            checkpointService.saveResult(mediaId, agentState);
+            agentState = agentLoopService.run(mediaId, videoContext);
             mediaFile.setAiSummary(agentState.result().toMarkdown());
 
             // 3. 保存数据库 (这一步你已经成功了)
@@ -91,6 +92,15 @@ public class AiService {
             redisTemplate.delete("media:list:user:" + userIdStr);
             throw new IllegalStateException("AI analysis failed", e);
         }
+    }
+
+    public String followUp(Long mediaId, String question) {
+        VideoContext context = checkpointService.loadContext(mediaId);
+        if (context == null) {
+            throw new IllegalStateException("视频尚未完成 VideoContext 构建");
+        }
+        VideoContext followUpContext = new VideoContext(context.source(), question, context.segments());
+        return agentLoopService.run(followUpContext).result().toMarkdown();
     }
 
 

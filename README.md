@@ -332,22 +332,3 @@ npm run dev
 
 ## 贡献与支持
 如果这个项目对你有帮助，请给个 Star ⭐️⭐️⭐️⭐️⭐️！
-
-100Star！感谢大家的star支持，本项目代码价值并不高，更多价值在于记录了我自己面向就业学习的思考和进步，自己就业的相关项目文档也已开源。
-
-https://my.feishu.cn/wiki/K5PzwchG3iU8gLk8eomcqGIUnDe
-
-此项目在最初最小可行性框架实现后，也只是调用外部开源程序和第三方API的毫无亮点的项目，亮点都是要挖掘需求点一点点去增加的，而非看到优点去倒退需求。
-
-所以真诚祝愿大家，与其在乎项目是否烂大街，更重要的是面向就业，关于对于项目需求要有自己的思考。
-
-这远比项目本身是什么本身重要的多。
-
-
-## Endgame
-
-- [ ] The best is yet to come.
-
-<img width="1366" height="84" alt="dc2c2e9fa7a4411411f4601c57c1a982" src="https://github.com/user-attachments/assets/d066ef63-24c4-4321-afa6-ceeea3e43d19" />
-
-

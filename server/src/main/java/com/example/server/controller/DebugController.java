@@ -1,9 +1,14 @@
 package com.example.server.controller;
 
 import com.example.server.dto.AnalysisTaskMsg;
+import com.example.server.dto.AgentFeedback;
+import com.example.server.dto.AgentState;
 import com.example.server.entity.MediaFile;
 import com.example.server.mapper.MediaFileMapper;
 import com.example.server.service.AiService;
+import com.example.server.service.AgentCheckpointService;
+import com.example.server.service.AgentEvaluationService;
+import com.example.server.service.AgentTelemetry;
 import com.example.server.strategy.AiAnalysisStrategy;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -21,6 +26,7 @@ import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit; //导入时间单位
 
@@ -38,6 +44,15 @@ public class DebugController {
 
     @Autowired
     private AiService aiService;
+
+    @Autowired
+    private AgentCheckpointService checkpointService;
+
+    @Autowired
+    private AgentEvaluationService evaluationService;
+
+    @Autowired
+    private AgentTelemetry telemetry;
 
 
     @Autowired
@@ -127,6 +142,46 @@ public class DebugController {
             return "追问内容不能为空且不能超过 500 字";
         }
         return aiService.followUp(id, question);
+    }
+
+    @PostMapping("/agent-feedback")
+    public String agentFeedback(@RequestBody AgentFeedback feedback) {
+        if (feedback.mediaId() == null || feedback.goal() == null || feedback.goal().isBlank()) {
+            return "mediaId 和 goal 不能为空";
+        }
+        if (feedback.rating() != null && feedback.rating() != -1 && feedback.rating() != 1) {
+            return "rating 只能是 -1 或 1";
+        }
+        checkpointService.saveFeedback(feedback.normalized());
+        return "反馈已保存为 Agent 评测样本";
+    }
+
+    @PostMapping("/agent-revise")
+    public String reviseAgentResult(@RequestBody AgentFeedback feedback) {
+        if (feedback.mediaId() == null || feedback.goal() == null || feedback.goal().isBlank()) {
+            return "mediaId 和 goal 不能为空";
+        }
+        return aiService.reviseAndRerun(feedback);
+    }
+
+    @GetMapping("/agent-feedback")
+    public List<AgentFeedback> agentFeedback(@RequestParam Long id) {
+        return checkpointService.loadFeedback(id);
+    }
+
+    @GetMapping("/agent-plan")
+    public AgentState.AgentPlan agentPlan(@RequestParam Long id, @RequestParam String goal) {
+        return checkpointService.loadPlan(id, goal);
+    }
+
+    @GetMapping("/agent-evaluation")
+    public Map<String, Object> agentEvaluation(@RequestParam Long id, @RequestParam String goal) {
+        return evaluationService.evaluate(id, goal);
+    }
+
+    @GetMapping("/agent-trace")
+    public Map<String, Object> agentTrace(@RequestParam Long id) {
+        return telemetry.latest(id);
     }
 
     //下载音频接口

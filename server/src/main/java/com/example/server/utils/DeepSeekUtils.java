@@ -4,6 +4,7 @@ import com.example.server.dto.AgentState;
 import com.example.server.dto.AnalysisResult;
 import com.example.server.dto.VideoChunk;
 import com.example.server.dto.VideoContext;
+import com.example.server.service.AgentTelemetry;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.langchain4j.model.chat.ChatModel;
 import dev.langchain4j.model.openai.OpenAiChatModel;
@@ -36,10 +37,16 @@ public class DeepSeekUtils {
 
     private final ChatModel chatModel;
     private final ObjectMapper objectMapper;
+    private final AgentTelemetry telemetry;
+    private final double inputPricePerMillion;
+    private final double outputPricePerMillion;
 
     public DeepSeekUtils(@Value("${ai.deepseek.api-key}") String apiKey,
                          @Value("${ai.deepseek.base-url}") String baseUrl,
                          @Value("${ai.deepseek.model:deepseek-ai/DeepSeek-R1-Distill-Qwen-32B}") String modelName,
+                         @Value("${ai.deepseek.input-price-per-million:0}") double inputPricePerMillion,
+                         @Value("${ai.deepseek.output-price-per-million:0}") double outputPricePerMillion,
+                         AgentTelemetry telemetry,
                          ObjectMapper objectMapper) {
         this.chatModel = OpenAiChatModel.builder()
                 .baseUrl(baseUrl)
@@ -47,13 +54,16 @@ public class DeepSeekUtils {
                 .modelName(modelName)
                 .build();
         this.objectMapper = objectMapper;
+        this.telemetry = telemetry;
+        this.inputPricePerMillion = inputPricePerMillion;
+        this.outputPricePerMillion = outputPricePerMillion;
     }
 
     public String analyzeContent(String content) {
         if (content == null || content.isBlank()) {
             return "无法提取有效信息";
         }
-        return chatModel.chat(SYSTEM_PROMPT + "\n\n待分析文本：\n" + content);
+        return chat("CONTENT_ANALYSIS", SYSTEM_PROMPT + "\n\n待分析文本：\n" + content);
     }
 
     public AgentState.AgentPlan plan(VideoContext context) {
@@ -68,7 +78,7 @@ public class DeepSeekUtils {
                     }
                     VideoContext:
                     """ + objectMapper.writeValueAsString(context);
-            return parseJson(chatModel.chat(prompt), AgentState.AgentPlan.class);
+            return parseJson(chat("PLANNER", prompt), AgentState.AgentPlan.class);
         } catch (Exception e) {
             throw new IllegalStateException("Agent 任务规划失败", e);
         }
@@ -85,7 +95,7 @@ public class DeepSeekUtils {
                     }
                     原始片段：
                     """ + objectMapper.writeValueAsString(segments);
-            return parseJson(chatModel.chat(prompt), VideoChunk.ChunkSummary.class);
+            return parseJson(chat("CHUNK_SUMMARY", prompt), VideoChunk.ChunkSummary.class);
         } catch (Exception e) {
             throw new IllegalStateException("视频片段摘要失败", e);
         }
@@ -119,7 +129,7 @@ public class DeepSeekUtils {
 
                     VideoContext:
                     """ + objectMapper.writeValueAsString(context);
-            return parseJson(chatModel.chat(prompt), AnalysisResult.class);
+            return parseJson(chat("EXECUTOR", prompt), AnalysisResult.class);
         } catch (Exception e) {
             throw new IllegalStateException("Agent 执行失败", e);
         }
@@ -156,7 +166,7 @@ public class DeepSeekUtils {
 
                     VideoContext:
                     """ + objectMapper.writeValueAsString(context);
-            return parseJson(chatModel.chat(prompt), AgentState.CriticResult.class);
+            return parseJson(chat("CRITIC", prompt), AgentState.CriticResult.class);
         } catch (Exception e) {
             throw new IllegalStateException("Critic 校验失败", e);
         }
@@ -168,5 +178,19 @@ public class DeepSeekUtils {
                 .replace("```", "")
                 .trim();
         return objectMapper.readValue(json, type);
+    }
+
+    private String chat(String stage, String prompt) {
+        long started = System.nanoTime();
+        try {
+            String response = chatModel.chat(prompt);
+            telemetry.modelCall(stage, prompt, response,
+                    inputPricePerMillion, outputPricePerMillion, started);
+            return response;
+        } catch (RuntimeException e) {
+            telemetry.incrementCurrent("modelCallFailures", 1);
+            telemetry.failCurrentStage(stage, started);
+            throw e;
+        }
     }
 }

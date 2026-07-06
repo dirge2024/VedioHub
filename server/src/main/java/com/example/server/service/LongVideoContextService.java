@@ -1,5 +1,6 @@
 package com.example.server.service;
 
+import com.example.server.dto.AgentState;
 import com.example.server.dto.VideoChunk;
 import com.example.server.dto.VideoContext;
 import com.example.server.utils.DeepSeekUtils;
@@ -9,7 +10,9 @@ import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 @Service
 public class LongVideoContextService {
@@ -23,6 +26,9 @@ public class LongVideoContextService {
     @Autowired
     private EmbeddingUtils embeddingUtils;
 
+    @Autowired
+    private AgentTelemetry telemetry;
+
     public VideoContext selectRelevant(VideoContext context) {
         if (context.segments().isEmpty()
                 || context.segments().get(context.segments().size() - 1).endMs() <= CHUNK_MS) {
@@ -32,17 +38,63 @@ public class LongVideoContextService {
         List<VideoChunk> chunks = buildChunks(context.segments());
         List<Double> queryEmbedding = embeddingUtils.embed(context.userGoal());
 
-        List<VideoContext.VideoSegment> selectedSegments = chunks.stream()
+        List<VideoChunk> rankedChunks = chunks.stream()
                 .sorted(Comparator.comparingDouble(
                         (VideoChunk chunk) -> hybridScore(
                                 context.userGoal(), queryEmbedding, chunk)
                 ).reversed())
                 .limit(TOP_K)
+                .toList();
+        if (!rankedChunks.isEmpty()) {
+            telemetry.valueCurrent("retrievalTopScore",
+                    hybridScore(context.userGoal(), queryEmbedding, rankedChunks.get(0)));
+            telemetry.incrementCurrent("retrievalChunks", rankedChunks.size());
+        }
+
+        List<VideoContext.VideoSegment> selectedSegments = rankedChunks.stream()
                 .flatMap(chunk -> chunk.rawSegments().stream())
                 .sorted(Comparator.comparingLong(VideoContext.VideoSegment::startMs))
                 .toList();
 
         return new VideoContext(context.source(), context.userGoal(), selectedSegments);
+    }
+
+    public VideoContext refineForCritique(VideoContext fullContext,
+                                          VideoContext selectedContext,
+                                          AgentState.CriticResult critique) {
+        Map<String, VideoContext.VideoSegment> segments = new LinkedHashMap<>();
+        selectedContext.segments().forEach(segment -> segments.put(segmentKey(segment), segment));
+
+        List<Long> requiredTimestamps = critique == null ? List.of() : critique.requiredTimestamps();
+        if (requiredTimestamps != null) {
+            fullContext.segments().stream()
+                    .filter(segment -> requiredTimestamps.stream().anyMatch(timestamp ->
+                            timestamp >= segment.startMs() && timestamp < segment.endMs()))
+                    .forEach(segment -> segments.put(segmentKey(segment), segment));
+        }
+
+        String critiqueQuery = critiqueQuery(fullContext.userGoal(), critique);
+        VideoContext retryContext = selectRelevant(
+                new VideoContext(fullContext.source(), critiqueQuery, fullContext.segments()));
+        retryContext.segments().forEach(segment -> segments.put(segmentKey(segment), segment));
+
+        List<VideoContext.VideoSegment> merged = segments.values().stream()
+                .sorted(Comparator.comparingLong(VideoContext.VideoSegment::startMs))
+                .toList();
+        return new VideoContext(fullContext.source(), fullContext.userGoal(), merged);
+    }
+
+    private String critiqueQuery(String goal, AgentState.CriticResult critique) {
+        if (critique == null) return goal;
+        return String.join("\n",
+                goal,
+                String.join(" ", critique.feedback() == null ? List.of() : critique.feedback()),
+                String.join(" ", critique.missingRequirements() == null ? List.of() : critique.missingRequirements()),
+                String.join(" ", critique.unsupportedClaims() == null ? List.of() : critique.unsupportedClaims()));
+    }
+
+    private String segmentKey(VideoContext.VideoSegment segment) {
+        return segment.startMs() + ":" + segment.endMs();
     }
 
     private List<VideoChunk> buildChunks(List<VideoContext.VideoSegment> segments) {

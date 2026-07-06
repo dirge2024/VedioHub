@@ -88,13 +88,15 @@ public class MinioUtils {
         }
         String objectName = UUID.randomUUID() + suffix;
 
+        String contentType = java.nio.file.Files.probeContentType(file.toPath());
+        if (contentType == null) contentType = "application/octet-stream";
         try (java.io.FileInputStream inputStream = new java.io.FileInputStream(file)) {
             minioClient.putObject(
                     io.minio.PutObjectArgs.builder()
                             .bucket(bucketName)
                             .object(objectName)
                             .stream(inputStream, file.length(), -1)
-                            .contentType("video/mp4")
+                            .contentType(contentType)
                             .build()
             );
         }

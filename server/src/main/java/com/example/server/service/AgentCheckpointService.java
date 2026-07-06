@@ -1,11 +1,14 @@
 package com.example.server.service;
 
 import com.example.server.dto.AgentState;
+import com.example.server.dto.AgentFeedback;
 import com.example.server.dto.VideoContext;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
+
+import java.util.List;
 
 @Service
 public class AgentCheckpointService {
@@ -28,12 +31,18 @@ public class AgentCheckpointService {
         return read(goalKey(mediaId, goal), "plan", AgentState.AgentPlan.class);
     }
 
+    public AgentState loadCriticState(Long mediaId, String goal) {
+        return read(goalKey(mediaId, goal), "criticState", AgentState.class);
+    }
+
     public void saveContext(Long mediaId, VideoContext context) {
         write(checkpointKey(mediaId), "context", "CONTEXT_COMPLETED", context);
     }
 
     public void saveResult(Long mediaId, AgentState state) {
-        write(goalKey(mediaId, state.goal()), "result", "ANALYSIS_COMPLETED", state);
+        String stage = state.critique() != null && state.critique().passed()
+                ? "ANALYSIS_COMPLETED" : "ANALYSIS_COMPLETED_WITH_WARNINGS";
+        write(goalKey(mediaId, state.goal()), "result", stage, state);
     }
 
     public void savePlan(Long mediaId, String goal, AgentState.AgentPlan plan) {
@@ -41,7 +50,47 @@ public class AgentCheckpointService {
     }
 
     public void saveCriticState(Long mediaId, AgentState state) {
-        write(goalKey(mediaId, state.goal()), "criticState", "CRITIC_COMPLETED", state);
+        String stage = state.critique() != null && state.critique().passed()
+                ? "CRITIC_PASSED" : "CRITIC_RETRY_REQUIRED";
+        write(goalKey(mediaId, state.goal()), "criticState", stage, state);
+    }
+
+    public void resetForRerun(Long mediaId, String goal, AgentState.AgentPlan plan) {
+        String key = goalKey(mediaId, goal);
+        redisTemplate.delete(key);
+        if (plan != null) savePlan(mediaId, goal, plan);
+    }
+
+    public void saveFeedback(AgentFeedback feedback) {
+        try {
+            redisTemplate.opsForList().rightPush(
+                    feedbackKey(feedback.mediaId()), objectMapper.writeValueAsString(feedback.normalized()));
+        } catch (Exception e) {
+            throw new IllegalStateException("保存 Agent 用户反馈失败", e);
+        }
+    }
+
+    public List<AgentFeedback> loadFeedback(Long mediaId) {
+        try {
+            List<String> values = redisTemplate.opsForList().range(feedbackKey(mediaId), 0, -1);
+            if (values == null) return List.of();
+            return values.stream().map(value -> {
+                try {
+                    return objectMapper.readValue(value, AgentFeedback.class);
+                } catch (Exception e) {
+                    throw new IllegalStateException(e);
+                }
+            }).toList();
+        } catch (Exception e) {
+            throw new IllegalStateException("读取 Agent 用户反馈失败", e);
+        }
+    }
+
+    public void saveFailure(Long mediaId, String goal, String failedStage, Exception error) {
+        String key = goalKey(mediaId, goal);
+        redisTemplate.opsForHash().put(key, "stage", "FAILED");
+        redisTemplate.opsForHash().put(key, "failedStage", failedStage);
+        redisTemplate.opsForHash().put(key, "error", String.valueOf(error.getMessage()));
     }
 
     private <T> T read(String key, String field, Class<T> type) {
@@ -68,5 +117,9 @@ public class AgentCheckpointService {
 
     private String goalKey(Long mediaId, String goal) {
         return checkpointKey(mediaId) + ":goal:" + Integer.toHexString(String.valueOf(goal).hashCode());
+    }
+
+    private String feedbackKey(Long mediaId) {
+        return "agent:feedback:" + mediaId;
     }
 }

@@ -1,6 +1,7 @@
 package com.example.server.service;
 
 import com.example.server.dto.AgentState;
+import com.example.server.dto.AgentFeedback;
 import com.example.server.dto.VideoContext;
 import com.example.server.entity.MediaFile;
 import com.example.server.mapper.MediaFileMapper;
@@ -34,11 +35,19 @@ public class AiService {
     @Autowired
     private AgentCheckpointService checkpointService;
 
+    @Autowired
+    private AgentTelemetry telemetry;
+
     public void asyncAnalyze(Long mediaId, String userGoal) {
+        String traceId = telemetry.start(mediaId);
+        telemetry.bind(traceId);
         System.out.println(" [线程池] 开始处理任务，ID: " + mediaId);
 
         MediaFile mediaFile = mediaFileMapper.selectById(mediaId);
-        if (mediaFile == null) return;
+        if (mediaFile == null) {
+            telemetry.clear();
+            return;
+        }
 
         try {
             AgentState agentState = checkpointService.loadResult(mediaId, userGoal);
@@ -51,7 +60,14 @@ public class AiService {
             // ASR + 场景关键帧 OCR 按时间轴合并为统一上下文
             VideoContext videoContext = checkpointService.loadContext(mediaId);
             if (videoContext == null) {
-                videoContext = videoContextService.build(mediaFile.getFilePath(), userGoal);
+                long contextStarted = System.nanoTime();
+                try {
+                    videoContext = videoContextService.build(mediaFile.getFilePath(), userGoal, traceId);
+                    telemetry.stage(traceId, "VIDEO_CONTEXT", contextStarted, true);
+                } catch (RuntimeException e) {
+                    telemetry.stage(traceId, "VIDEO_CONTEXT", contextStarted, false);
+                    throw e;
+                }
                 checkpointService.saveContext(mediaId, videoContext);
             } else {
                 videoContext = new VideoContext(videoContext.source(), userGoal, videoContext.segments());
@@ -59,7 +75,14 @@ public class AiService {
             mediaFile.setTranscriptText(videoContext.transcriptText());
 
             // Planner -> Executor -> Critic，最多两轮后强制结束
-            agentState = agentLoopService.run(mediaId, videoContext);
+            long agentStarted = System.nanoTime();
+            try {
+                agentState = agentLoopService.run(mediaId, videoContext);
+                telemetry.stage(traceId, "AGENT_LOOP", agentStarted, true);
+            } catch (RuntimeException e) {
+                telemetry.stage(traceId, "AGENT_LOOP", agentStarted, false);
+                throw e;
+            }
             mediaFile.setAiSummary(agentState.result().toMarkdown());
 
             // 3. 保存数据库 (这一步你已经成功了)
@@ -90,7 +113,10 @@ public class AiService {
             // 失败也要删缓存，否则前端会一直转圈看不到“失败”两个字
             String userIdStr = (mediaFile.getUserId() == null) ? "anon" : String.valueOf(mediaFile.getUserId());
             redisTemplate.delete("media:list:user:" + userIdStr);
+            checkpointService.saveFailure(mediaId, userGoal, "AI_ANALYSIS", e);
             throw new IllegalStateException("AI analysis failed", e);
+        } finally {
+            telemetry.clear();
         }
     }
 
@@ -101,6 +127,35 @@ public class AiService {
         }
         VideoContext followUpContext = new VideoContext(context.source(), question, context.segments());
         return agentLoopService.run(followUpContext).result().toMarkdown();
+    }
+
+    public String reviseAndRerun(AgentFeedback feedback) {
+        AgentFeedback normalized = feedback.normalized();
+        checkpointService.saveFeedback(normalized);
+
+        VideoContext context = checkpointService.loadContext(normalized.mediaId());
+        if (context == null) throw new IllegalStateException("视频尚未完成 VideoContext 构建");
+
+        String goal = normalized.correctedGoal() == null || normalized.correctedGoal().isBlank()
+                ? normalized.goal() : normalized.correctedGoal();
+        AgentState.AgentPlan correctedPlan = normalized.correctedTasks().isEmpty() ? null
+                : new AgentState.AgentPlan(goal, normalized.correctedTasks());
+        checkpointService.resetForRerun(normalized.mediaId(), goal, correctedPlan);
+
+        VideoContext revisedContext = new VideoContext(context.source(), goal, context.segments());
+        String traceId = telemetry.start(normalized.mediaId());
+        telemetry.bind(traceId);
+        long started = System.nanoTime();
+        try {
+            String result = agentLoopService.run(normalized.mediaId(), revisedContext).result().toMarkdown();
+            telemetry.stage(traceId, "HUMAN_REVISE", started, true);
+            return result;
+        } catch (RuntimeException e) {
+            telemetry.stage(traceId, "HUMAN_REVISE", started, false);
+            throw e;
+        } finally {
+            telemetry.clear();
+        }
     }
 
 

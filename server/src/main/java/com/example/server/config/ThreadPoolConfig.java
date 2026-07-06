@@ -32,4 +32,26 @@ public class ThreadPoolConfig {
         executor.initialize();
         return executor;
     }
+
+    @Bean("asrExecutor")
+    public Executor asrExecutor() {
+        return executor("ASR-Thread-", 4, 8, 50);
+    }
+
+    @Bean("ocrExecutor")
+    public Executor ocrExecutor() {
+        int cores = Math.max(1, Runtime.getRuntime().availableProcessors() / 2);
+        return executor("OCR-Thread-", cores, cores, 20);
+    }
+
+    private Executor executor(String prefix, int coreSize, int maxSize, int queueCapacity) {
+        ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
+        executor.setCorePoolSize(coreSize);
+        executor.setMaxPoolSize(maxSize);
+        executor.setQueueCapacity(queueCapacity);
+        executor.setThreadNamePrefix(prefix);
+        executor.setRejectedExecutionHandler(new ThreadPoolExecutor.CallerRunsPolicy());
+        executor.initialize();
+        return executor;
+    }
 }

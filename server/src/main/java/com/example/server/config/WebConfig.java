@@ -1,23 +1,22 @@
 package com.example.server.config;
 
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.web.servlet.config.annotation.CorsRegistry;
-import org.springframework.web.servlet.config.annotation.ResourceHandlerRegistry;
 import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
 
 @Configuration
 public class WebConfig implements WebMvcConfigurer {
 
+    @Value("${app.cors.allowed-origins:http://localhost:5173,http://127.0.0.1:5173}")
+    private String allowedOrigins;
 
-
-    //新增全局跨域配置 (解决 Network Error)，放弃本地调用
     @Override
     public void addCorsMappings(CorsRegistry registry) {
         registry.addMapping("/**")
-                //允许所有前端来源
-                .allowedOriginPatterns("*")
-                //允许 GET, POST, DELETE 等所有方法
-                .allowedMethods("*")
+                .allowedOrigins(allowedOrigins.split(","))
+                .allowedMethods("GET", "POST", "DELETE", "OPTIONS")
+                .allowedHeaders("*")
                 .allowCredentials(true)
                 .maxAge(3600);
     }

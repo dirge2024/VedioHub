@@ -5,6 +5,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
 import java.time.Instant;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.UUID;
@@ -16,12 +17,21 @@ import java.util.concurrent.atomic.LongAdder;
 public class AgentTelemetry {
 
     private static final Logger log = LoggerFactory.getLogger(AgentTelemetry.class);
+    private static final int MAX_TRACES = 500;
 
     private final Map<String, TraceData> traces = new ConcurrentHashMap<>();
     private final Map<Long, String> latestTraceByTask = new ConcurrentHashMap<>();
     private final ThreadLocal<String> currentTrace = new ThreadLocal<>();
 
     public String start(Long taskId) {
+        if (traces.size() >= MAX_TRACES) {
+            traces.values().stream()
+                    .min(Comparator.comparing(trace -> trace.startedAt))
+                    .ifPresent(trace -> {
+                        traces.remove(trace.traceId);
+                        latestTraceByTask.remove(trace.taskId, trace.traceId);
+                    });
+        }
         String traceId = UUID.randomUUID().toString();
         traces.put(traceId, new TraceData(traceId, taskId));
         latestTraceByTask.put(taskId, traceId);

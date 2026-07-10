@@ -177,6 +177,11 @@ public class DeepSeekUtils {
                 .replace("```json", "")
                 .replace("```", "")
                 .trim();
+        int start = json.indexOf('{');
+        int end = json.lastIndexOf('}');
+        if (start >= 0 && end > start) {
+            json = json.substring(start, end + 1);
+        }
         return objectMapper.readValue(json, type);
     }
 

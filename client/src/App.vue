@@ -156,13 +156,13 @@
               <button
                   class="dock-item ai-core"
                   :disabled="item.status !== 'COMPLETED'"
-                  @click="aiAnalyze(item.id)"
+                  @click="openAgent(item)"
               >
                 <span class="item-icon">
                   <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2" ry="2"></rect><rect x="9" y="9" width="6" height="6"></rect><line x1="9" y1="1" x2="9" y2="4"></line><line x1="15" y1="1" x2="15" y2="4"></line><line x1="9" y1="20" x2="9" y2="23"></line><line x1="15" y1="20" x2="15" y2="23"></line><line x1="20" y1="9" x2="23" y2="9"></line><line x1="20" y1="14" x2="23" y2="14"></line><line x1="1" y1="9" x2="4" y2="9"></line><line x1="1" y1="14" x2="4" y2="14"></line></svg>
                 </span>
                 <div class="label-group">
-                  <span class="item-label">AI 智能总结</span>
+                  <span class="item-label">Video Agent</span>
                 </div>
                 <div class="shimmer"></div>
               </button>
@@ -186,9 +186,57 @@
           <button class="close-btn" @click="closeSidebar">×</button>
         </div>
         <div class="sidebar-body">
-          <div v-if="sidebar.loading" class="loading-state"><div class="quantum-loader small"></div><p>数据流处理中...</p></div>
+          <div v-if="sidebar.type === 'ai' && sidebar.mode === 'compose'" class="agent-composer">
+            <p class="agent-caption">告诉 Agent 你希望从视频中得到什么产物</p>
+            <textarea v-model="sidebar.goal" maxlength="500" placeholder="例如：梳理核心观点，给出带时间戳的证据和可执行建议"></textarea>
+            <div class="goal-presets">
+              <button v-for="preset in goalPresets" :key="preset" @click="sidebar.goal = preset">{{ preset }}</button>
+            </div>
+            <button class="agent-run-btn" :disabled="!sidebar.goal.trim()" @click="submitAgent">开始分析</button>
+          </div>
+
+          <div v-else-if="sidebar.loading" class="agent-running">
+            <div class="loading-state"><div class="quantum-loader small"></div><p>Agent 正在分析视频证据...</p></div>
+            <div v-if="sidebar.plan?.tasks?.length" class="agent-meta-block">
+              <span class="meta-label">任务计划</span>
+              <ol><li v-for="task in sidebar.plan.tasks" :key="task">{{ task }}</li></ol>
+            </div>
+            <div v-if="traceStages.length" class="agent-meta-block">
+              <span class="meta-label">已完成阶段</span>
+              <div class="stage-list"><span v-for="stage in traceStages" :key="stage[0]">{{ stage[0] }} · {{ stage[1] }}ms</span></div>
+            </div>
+          </div>
+
           <div v-else>
-            <div v-if="sidebar.type === 'ai'" class="markdown-content" v-html="renderedMarkdown"></div>
+            <div v-if="sidebar.type === 'ai'">
+              <div class="markdown-content" v-html="renderedMarkdown"></div>
+              <div v-if="sidebar.plan?.tasks?.length || traceStages.length" class="agent-inspector">
+                <div v-if="sidebar.plan?.tasks?.length" class="agent-meta-block">
+                  <span class="meta-label">Planner 任务</span>
+                  <ol><li v-for="task in sidebar.plan.tasks" :key="task">{{ task }}</li></ol>
+                </div>
+                <div v-if="traceStages.length" class="agent-meta-block">
+                  <span class="meta-label">执行轨迹</span>
+                  <div class="stage-list"><span v-for="stage in traceStages" :key="stage[0]">{{ stage[0] }} · {{ stage[1] }}ms</span></div>
+                </div>
+                <div v-if="sidebar.evaluation && Object.keys(sidebar.evaluation).length" class="quality-row">
+                  <span>结构完整 {{ sidebar.evaluation.structuredValid ? '通过' : '待完善' }}</span>
+                  <span>证据支持 {{ formatPercent(sidebar.evaluation.evidenceSupportRate) }}</span>
+                  <span>Critic {{ sidebar.evaluation.criticPassed ? '通过' : '达到轮次上限' }}</span>
+                </div>
+              </div>
+              <div class="follow-up-box">
+                <textarea v-model="sidebar.followUp" maxlength="500" placeholder="基于视频继续追问..."></textarea>
+                <button :disabled="sidebar.followUpLoading || !sidebar.followUp.trim()" @click="submitFollowUp">
+                  {{ sidebar.followUpLoading ? '分析中' : '追问' }}
+                </button>
+              </div>
+              <div class="feedback-row">
+                <span>这个结果有帮助吗？</span>
+                <button :class="{ active: sidebar.feedback === 1 }" @click="sendFeedback(1)" title="有帮助">赞</button>
+                <button :class="{ active: sidebar.feedback === -1 }" @click="sendFeedback(-1)" title="需改进">踩</button>
+              </div>
+            </div>
             <div v-else class="text-content"><pre>{{ sidebar.content }}</pre></div>
           </div>
         </div>
@@ -232,17 +280,67 @@
 </template>
 
 <script setup>
-import { ref, onMounted, computed } from 'vue'
+import { ref, onMounted, onUnmounted, computed } from 'vue'
 import { marked } from 'marked'
 
 // --- 变量定义 ---
+const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:9090'
+const DEMO_MODE = new URLSearchParams(window.location.search).has('demo')
+const DEFAULT_GOAL = '理解视频核心内容，提炼关键结论，并给出带时间戳的证据和可执行建议'
+const goalPresets = ['生成学习笔记', '提炼会议结论', '梳理操作步骤']
+const apiUrl = (path) => `${API_BASE}${path}`
+const DEMO_ITEM = {
+  id: 1001,
+  filename: '数据结构课程 · 二叉树遍历.mp4',
+  status: 'COMPLETED',
+  uploadTime: '2026-07-10T14:30:00',
+  transcriptText: '本节课介绍二叉树前序、中序和后序遍历，并对比递归与迭代实现。'
+}
+const DEMO_PLAN = {
+  understoodGoal: DEFAULT_GOAL,
+  tasks: ['定位视频章节与核心主题', '融合 ASR 与关键帧 OCR 证据', '提炼结论并进行 Critic 校验']
+}
+const DEMO_TRACE = {
+  stageDurationMs: { VIDEO_CONTEXT: 12840, RETRIEVAL: 860, PLANNER: 1150, EXECUTOR: 3420, CRITIC: 1260 }
+}
+const DEMO_EVALUATION = { structuredValid: true, evidenceSupportRate: 0.92, criticPassed: true }
+const DEMO_RESULT = `## 二叉树遍历课程分析
+
+## 核心结论
+- 前序遍历遵循“根节点、左子树、右子树”，适合构建树结构副本。
+- 中序遍历二叉搜索树时可得到有序序列。
+- 递归实现更直观，迭代实现通过栈显式保存访问状态。
+
+## 视频证据
+- [02:05] ASR：老师开始讲解前序遍历的访问顺序。
+- [02:08] OCR：课件显示“根节点 → 左子树 → 右子树”。
+- [08:42] ASR + OCR：对比递归调用栈与显式栈实现。
+
+## 学习建议
+- 用同一棵树手动推演三种遍历顺序。
+- 分别实现递归版与迭代版，重点理解栈中保存的状态。`
 const file = ref(null)
 const videoUrl = ref('')
 const message = ref('')
 const uploading = ref(false)
 const list = ref([])
 const isDragOver = ref(false)
-const sidebar = ref({ visible: false, type: 'ai', title: '', content: '', loading: false })
+const sidebar = ref({
+  visible: false,
+  type: 'ai',
+  mode: 'compose',
+  title: '',
+  content: '',
+  loading: false,
+  mediaId: null,
+  goal: DEFAULT_GOAL,
+  followUp: '',
+  followUpLoading: false,
+  plan: null,
+  trace: null,
+  evaluation: null,
+  feedback: null
+})
 const currentUser = ref(null)
 const showAuthModal = ref(false)
 const authMode = ref('login')
@@ -251,6 +349,7 @@ const authMessage = ref('')
 const authError = ref(false)
 const authForm = ref({ username: '', password: '', nickname: '' })
 const pollingTimers = ref({})
+const traceStages = computed(() => Object.entries(sidebar.value.trace?.stageDurationMs || {}))
 
 // Markdown 解析
 const renderedMarkdown = computed(() => {
@@ -258,7 +357,17 @@ const renderedMarkdown = computed(() => {
   let cleanText = sidebar.value.content.replace(/<think>[\s\S]*?<\/think>/gi, "")
   if (cleanText.includes("</think>")) cleanText = cleanText.split("</think>").pop()
   if (!cleanText.trim()) cleanText = sidebar.value.content
-  return marked.parse(cleanText)
+  const template = document.createElement('template')
+  template.innerHTML = marked.parse(cleanText)
+  template.content.querySelectorAll('script, iframe, object, embed, style').forEach(node => node.remove())
+  template.content.querySelectorAll('*').forEach(node => {
+    for (const attribute of [...node.attributes]) {
+      if (attribute.name.startsWith('on') || /^(javascript|data):/i.test(attribute.value)) {
+        node.removeAttribute(attribute.name)
+      }
+    }
+  })
+  return template.innerHTML
 })
 
 // --- 核心业务逻辑 ---
@@ -272,6 +381,11 @@ const handleFileChange = async (e) => {
   }
   const selectedFile = e.target.files[0]
   if (!selectedFile) return
+  if (!selectedFile.type.startsWith('video/')) {
+    e.target.value = ''
+    showMsg('⚠️ 仅支持上传视频文件', true)
+    return
+  }
   file.value = selectedFile
   videoUrl.value = ''
   await uploadFile()
@@ -297,9 +411,14 @@ const handleDrop = async (e) => {
 }
 
 const CHUNK_SIZE = 5 * 1024 * 1024
+const UPLOAD_CONCURRENCY = 3
 
 const uploadFile = async () => {
   if (!file.value) return
+  if (DEMO_MODE) {
+    showMsg('演示模式：已模拟完成分片上传')
+    return
+  }
   uploading.value = true
   const selectedFile = file.value
   const totalChunks = Math.ceil(selectedFile.size / CHUNK_SIZE)
@@ -310,7 +429,7 @@ const uploadFile = async () => {
     let uploadedChunks = new Set()
 
     if (uploadId) {
-      const statusRes = await fetch(`http://localhost:9090/media/upload-status?uploadId=${encodeURIComponent(uploadId)}`)
+      const statusRes = await fetch(apiUrl(`/media/upload-status?uploadId=${encodeURIComponent(uploadId)}`))
       if (statusRes.ok) {
         uploadedChunks = new Set(await statusRes.json())
       } else {
@@ -325,33 +444,43 @@ const uploadFile = async () => {
         totalChunks: String(totalChunks),
         userId: String(currentUser.value.id)
       })
-      const initRes = await fetch(`http://localhost:9090/media/init-upload?${params}`, { method: 'POST' })
+      const initRes = await fetch(apiUrl(`/media/init-upload?${params}`), { method: 'POST' })
       const initText = await initRes.text()
       if (!initRes.ok) throw new Error(initText || 'Failed to initialize upload')
       uploadId = initText
       localStorage.setItem(storageKey, uploadId)
     }
 
-    for (let index = 0; index < totalChunks; index++) {
-      if (uploadedChunks.has(index)) continue
+    const pendingChunks = Array.from({ length: totalChunks }, (_, index) => index)
+      .filter(index => !uploadedChunks.has(index))
+    let cursor = 0
+    let completedChunks = uploadedChunks.size
 
-      message.value = `正在上传分片 ${index + 1}/${totalChunks}...`
+    const uploadNext = async () => {
+      while (cursor < pendingChunks.length) {
+        const index = pendingChunks[cursor++]
       const formData = new FormData()
       formData.append('uploadId', uploadId)
       formData.append('chunkIndex', String(index))
       formData.append('totalChunks', String(totalChunks))
       formData.append('file', selectedFile.slice(index * CHUNK_SIZE, Math.min(selectedFile.size, (index + 1) * CHUNK_SIZE)))
 
-      const chunkRes = await fetch('http://localhost:9090/media/upload-chunk', {
+      const chunkRes = await fetch(apiUrl('/media/upload-chunk'), {
         method: 'POST',
         body: formData
       })
       if (!chunkRes.ok) throw new Error(await chunkRes.text() || `Chunk ${index} failed`)
+        completedChunks++
+        message.value = `正在上传分片 ${completedChunks}/${totalChunks}...`
+      }
     }
+    await Promise.all(Array.from(
+      { length: Math.min(UPLOAD_CONCURRENCY, pendingChunks.length) }, uploadNext
+    ))
 
     message.value = '分片上传完成，正在合并文件...'
     const completeParams = new URLSearchParams({ uploadId })
-    const completeRes = await fetch(`http://localhost:9090/media/complete-upload?${completeParams}`, { method: 'POST' })
+    const completeRes = await fetch(apiUrl(`/media/complete-upload?${completeParams}`), { method: 'POST' })
     if (!completeRes.ok) throw new Error(await completeRes.text() || 'Upload merge failed')
 
     localStorage.removeItem(storageKey)
@@ -368,6 +497,11 @@ const uploadFile = async () => {
 // 【链接上传 - 修复版】
 const handleUrlUpload = async () => {
   if (!videoUrl.value) return
+  if (DEMO_MODE) {
+    videoUrl.value = ''
+    showMsg('演示模式：已模拟完成链接解析')
+    return
+  }
 
   if (!currentUser.value) {
     showMsg('⚠️ 权限受限：请先登录系统', true)
@@ -375,8 +509,13 @@ const handleUrlUpload = async () => {
     return
   }
 
-  // 简单校验链接
-  if (!videoUrl.value.startsWith('http')) {
+  let parsedUrl
+  try {
+    parsedUrl = new URL(videoUrl.value)
+  } catch {
+    parsedUrl = null
+  }
+  if (!parsedUrl || !['http:', 'https:'].includes(parsedUrl.protocol)) {
     showMsg('⚠️ 请输入合法的 http/https 链接', true)
     return
   }
@@ -389,7 +528,7 @@ const handleUrlUpload = async () => {
   if (currentUser.value) formData.append('userId', currentUser.value.id)
 
   try {
-    const res = await fetch('http://localhost:9090/media/upload-url', {
+    const res = await fetch(apiUrl('/media/upload-url'), {
       method: 'POST',
       body: formData
     })
@@ -417,17 +556,18 @@ const showMsg = (msg, isError = false) => {
 }
 
 const fetchList = async () => {
+  if (DEMO_MODE) return
   try {
-    let url = 'http://localhost:9090/media/list'
+    let url = apiUrl('/media/list')
     if (currentUser.value) {
       // 【核心修改】加一个 _t 时间戳，强制浏览器每次都发新请求，不许读缓存！
       const timestamp = new Date().getTime()
       url += `?userId=${currentUser.value.id}&_t=${timestamp}`
 
       const res = await fetch(url)
+      if (!res.ok) throw new Error('加载视频列表失败')
       const data = await res.json()
-      // 倒序排列，新的在前面
-      list.value = data.reverse()
+      list.value = data
     } else {
       list.value = []
     }
@@ -437,9 +577,14 @@ const fetchList = async () => {
 }
 
 const deleteItem = async (item) => {
+  if (DEMO_MODE) {
+    list.value = list.value.filter(i => i.id !== item.id)
+    showMsg('演示任务已移除')
+    return
+  }
   if (!confirm(`确认要永久删除 "${item.filename}" 吗？`)) return
   try {
-    let url = `http://localhost:9090/media/delete?id=${item.id}`
+    let url = apiUrl(`/media/delete?id=${item.id}`)
     if (currentUser.value) url += `&userId=${currentUser.value.id}`
     const res = await fetch(url, { method: 'DELETE' })
     const text = await res.text()
@@ -461,7 +606,11 @@ const formatTime = (timeStr) => {
 }
 
 const downloadAudio = async (item) => {
-  const url = `http://localhost:9090/debug/download?id=${item.id}`
+  if (DEMO_MODE) {
+    showMsg(`演示模式：${item.filename} 音频已准备`)
+    return
+  }
+  const url = apiUrl(`/debug/download?id=${item.id}`)
   let fileName = item.filename || 'audio.mp3';
   fileName = fileName.replace(/\.[^/.]+$/, "") + ".mp3";
   try {
@@ -485,6 +634,12 @@ const downloadAudio = async (item) => {
 
 const transcribe = async (id) => {
   const item = list.value.find(i => i.id === id)
+  if (DEMO_MODE) {
+    openSidebar('text', 'ASR 转写结果')
+    sidebar.value.content = item?.transcriptText || DEMO_ITEM.transcriptText
+    sidebar.value.loading = false
+    return
+  }
   if (item && item.transcriptText) {
     openSidebar('text', '全量文字提取')
     sidebar.value.content = item.transcriptText
@@ -501,7 +656,7 @@ const transcribe = async (id) => {
   sidebar.value.loading = true
   sidebar.value.content = "📝 提取任务已提交，正在识别语音流..."
   try {
-    await fetch(`http://localhost:9090/debug/transcribe?id=${id}`)
+    await fetch(apiUrl(`/debug/transcribe?id=${id}`))
     startPolling(id, 'text')
   } catch (e) {
     sidebar.value.content = "Error: " + e
@@ -510,50 +665,31 @@ const transcribe = async (id) => {
 }
 
 // === 【核心修改】AI 分析函数，增加限流/锁错误的处理 ===
-const aiAnalyze = async (id) => {
-  const item = list.value.find(i => i.id === id)
-
-  // 1. 如果已经有结果，直接显示
-  if (item && item.aiSummary && !item.aiSummary.includes("任务已") && !item.aiSummary.includes("正在")) {
-    openSidebar('ai', 'AI 智能总结')
-    sidebar.value.content = item.aiSummary
-    sidebar.value.loading = false
-    return
-  }
-
-  // 2. 如果正在轮询，直接打开侧边栏
+const aiAnalyze = async (id, goal) => {
   if (pollingTimers.value[id] && pollingTimers.value[id].type === 'ai') {
-    openSidebar('ai', 'AI 智能总结')
+    sidebar.value.mode = 'result'
     sidebar.value.loading = true
-    sidebar.value.content = "🚀 系统正在后台拼命计算中...\n\n(任务正在进行，无需重复提交)"
     return
   }
 
-  // 3. 准备提交请求，打开侧边栏loading
-  openSidebar('ai', 'AI 智能总结')
   sidebar.value.loading = true
-  sidebar.value.content = "🚀 正在向分布式集群请求计算资源..."
+  sidebar.value.mode = 'result'
+  sidebar.value.content = ''
 
   try {
-    // 请求后端
-    const res = await fetch(`http://localhost:9090/debug/ai?id=${id}`)
+    const params = new URLSearchParams({ id: String(id), goal })
+    const res = await fetch(apiUrl(`/debug/ai?${params}`))
     const text = await res.text()
 
-    // 4. 【关键逻辑】检查后端返回的文本
-    // 如果包含 "⚠️" (限流/锁) 或者 "❌" (报错)，说明任务被拒绝了
     if (text.includes("⚠️") || text.includes("❌")) {
-      // 弹窗提示错误
       showMsg(text, true)
-      // 关闭侧边栏，因为任务其实没开始
-      sidebar.value.visible = false
       sidebar.value.loading = false
+      sidebar.value.content = text
       return
     }
 
-    // 5. 如果成功 (包含 "✅" 或 "🚀")，开始轮询
-    startPolling(id, 'ai')
-    // 在侧边栏显示后端返回的提示 (比如 "✅ 任务已投递至 RocketMQ")
-    sidebar.value.content = text + "\n\n⏳ 等待消费者接单处理..."
+    startPolling(id, 'ai', goal)
+    refreshAgentMeta(id, goal, false)
 
   } catch (e) {
     sidebar.value.content = "Error: " + e
@@ -561,7 +697,7 @@ const aiAnalyze = async (id) => {
   }
 }
 
-const startPolling = (id, type) => {
+const startPolling = (id, type, goal = '') => {
   // 清理旧定时器
   if (pollingTimers.value[id]) clearInterval(pollingTimers.value[id].timer)
   console.log(`[轮询] 开始监听任务 ID: ${id}, 类型: ${type}`)
@@ -576,6 +712,7 @@ const startPolling = (id, type) => {
     let result = ''
 
     if (type === 'ai') {
+      if (sidebar.value.mediaId === id) refreshAgentMeta(id, goal, false)
       const text = item.aiSummary || ''
 
       // 【核心修改】纯文本判断逻辑，绝对不使用 Emoji
@@ -602,9 +739,10 @@ const startPolling = (id, type) => {
     // 2. 结算
     if (isFinished) {
       // 如果侧边栏正开着，更新内容
-      if (sidebar.value.visible && sidebar.value.title.includes(type === 'ai' ? 'AI' : '文字')) {
+      if (sidebar.value.visible && sidebar.value.type === type) {
         sidebar.value.content = result
         sidebar.value.loading = false
+        if (type === 'ai') refreshAgentMeta(id, goal, true)
       }
 
       // 只有成功才提示完成，报错则提示警告
@@ -639,6 +777,116 @@ const openSidebar = (type, title) => {
 }
 const closeSidebar = () => { sidebar.value.visible = false }
 
+const openAgent = (item) => {
+  sidebar.value = {
+    visible: true,
+    type: 'ai',
+    mode: 'compose',
+    title: `Video Agent · ${item.filename}`,
+    content: '',
+    loading: false,
+    mediaId: item.id,
+    goal: DEFAULT_GOAL,
+    followUp: '',
+    followUpLoading: false,
+    plan: null,
+    trace: null,
+    evaluation: null,
+    feedback: null
+  }
+}
+
+const submitAgent = () => {
+  const goal = sidebar.value.goal.trim()
+  if (!goal) return
+  if (DEMO_MODE) {
+    sidebar.value.mode = 'result'
+    sidebar.value.loading = true
+    sidebar.value.plan = DEMO_PLAN
+    sidebar.value.trace = DEMO_TRACE
+    setTimeout(showDemoResult, 450)
+    return
+  }
+  aiAnalyze(sidebar.value.mediaId, goal)
+}
+
+const showDemoResult = () => {
+  sidebar.value.mode = 'result'
+  sidebar.value.loading = false
+  sidebar.value.content = DEMO_RESULT
+  sidebar.value.plan = DEMO_PLAN
+  sidebar.value.trace = DEMO_TRACE
+  sidebar.value.evaluation = DEMO_EVALUATION
+}
+
+const refreshAgentMeta = async (id, goal, includeEvaluation) => {
+  const params = new URLSearchParams({ id: String(id), goal })
+  try {
+    const requests = [
+      fetch(apiUrl(`/debug/agent-plan?${params}`)),
+      fetch(apiUrl(`/debug/agent-trace?id=${id}`))
+    ]
+    if (includeEvaluation) requests.push(fetch(apiUrl(`/debug/agent-evaluation?${params}`)))
+    const responses = await Promise.all(requests)
+    if (sidebar.value.mediaId !== id) return
+    const planText = responses[0].ok ? await responses[0].text() : ''
+    const traceText = responses[1].ok ? await responses[1].text() : ''
+    if (planText) sidebar.value.plan = JSON.parse(planText)
+    if (traceText) sidebar.value.trace = JSON.parse(traceText)
+    if (includeEvaluation && responses[2]?.ok) {
+      const evaluationText = await responses[2].text()
+      if (evaluationText) sidebar.value.evaluation = JSON.parse(evaluationText)
+    }
+  } catch (error) {
+    console.warn('Agent metadata unavailable', error)
+  }
+}
+
+const submitFollowUp = async () => {
+  const question = sidebar.value.followUp.trim()
+  if (!question) return
+  if (DEMO_MODE) {
+    sidebar.value.content += `\n\n## 追问\n${question}\n\n根据 08:42 的讲解，迭代写法使用显式栈保存待访问节点，时间复杂度仍为 O(n)，额外空间复杂度为 O(h)。`
+    sidebar.value.followUp = ''
+    return
+  }
+  sidebar.value.followUpLoading = true
+  try {
+    const params = new URLSearchParams({ id: String(sidebar.value.mediaId), question })
+    const res = await fetch(apiUrl(`/debug/follow-up?${params}`))
+    const answer = await res.text()
+    if (!res.ok) throw new Error(answer || '追问失败')
+    sidebar.value.content += `\n\n## 追问\n${question}\n\n${answer}`
+    sidebar.value.followUp = ''
+  } catch (error) {
+    showMsg(`❌ ${error.message}`, true)
+  } finally {
+    sidebar.value.followUpLoading = false
+  }
+}
+
+const sendFeedback = async (rating) => {
+  if (DEMO_MODE) {
+    sidebar.value.feedback = rating
+    showMsg('演示反馈已记录')
+    return
+  }
+  try {
+    const res = await fetch(apiUrl('/debug/agent-feedback'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mediaId: sidebar.value.mediaId, goal: sidebar.value.goal, rating })
+    })
+    if (!res.ok) throw new Error(await res.text())
+    sidebar.value.feedback = rating
+    showMsg('反馈已记录')
+  } catch (error) {
+    showMsg(`❌ ${error.message}`, true)
+  }
+}
+
+const formatPercent = (value) => `${Math.round((Number(value) || 0) * 100)}%`
+
 const openAuthModal = () => {
   showAuthModal.value = true
   authMessage.value = ''
@@ -659,7 +907,7 @@ const handleAuth = async () => {
   authMessage.value = ''
   const endpoint = authMode.value === 'login' ? '/user/login' : '/user/register'
   try {
-    const res = await fetch(`http://localhost:9090${endpoint}`, {
+    const res = await fetch(apiUrl(endpoint), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(authForm.value)
@@ -690,12 +938,21 @@ const handleAuth = async () => {
   }
 }
 const logout = () => {
+  Object.values(pollingTimers.value).forEach(item => clearInterval(item.timer))
+  pollingTimers.value = {}
   currentUser.value = null
   localStorage.removeItem('user')
   list.value = []
   showMsg('已退出系统')
 }
 onMounted(() => {
+  if (DEMO_MODE) {
+    currentUser.value = { id: 1, nickname: 'Agent Demo' }
+    list.value = [DEMO_ITEM]
+    openAgent(DEMO_ITEM)
+    showDemoResult()
+    return
+  }
   const savedUser = localStorage.getItem('user')
   if (savedUser) {
     try {
@@ -703,6 +960,9 @@ onMounted(() => {
     } catch(e) {}
   }
   fetchList()
+})
+onUnmounted(() => {
+  Object.values(pollingTimers.value).forEach(item => clearInterval(item.timer))
 })
 </script>
 
@@ -899,6 +1159,47 @@ html, body, #app {
 .markdown-content strong { color: var(--accent-lime); font-weight: 700; }
 .markdown-content p { margin-bottom: 1em; }
 
+/* Agent workspace */
+.agent-composer { display: flex; flex-direction: column; gap: 18px; }
+.agent-caption { color: var(--text-sub); line-height: 1.7; }
+.agent-composer textarea, .follow-up-box textarea {
+  width: 100%; min-height: 130px; resize: vertical; background: #090a0d; color: var(--text-main);
+  border: 1px solid var(--border-tech); border-radius: 6px; padding: 14px; line-height: 1.6; outline: none;
+}
+.agent-composer textarea:focus, .follow-up-box textarea:focus { border-color: var(--accent-lime); }
+.goal-presets { display: flex; flex-wrap: wrap; gap: 8px; }
+.goal-presets button, .feedback-row button {
+  border: 1px solid var(--border-tech); border-radius: 4px; background: transparent; color: var(--text-sub);
+  padding: 7px 10px; cursor: pointer;
+}
+.goal-presets button:hover, .feedback-row button:hover, .feedback-row button.active {
+  color: var(--accent-lime); border-color: var(--accent-lime); background: rgba(197, 249, 70, 0.08);
+}
+.agent-run-btn {
+  border: 0; border-radius: 4px; padding: 13px 18px; background: var(--accent-lime); color: var(--text-inverse);
+  font-weight: 700; cursor: pointer;
+}
+.agent-run-btn:disabled, .follow-up-box button:disabled { opacity: 0.4; cursor: not-allowed; }
+.agent-running { display: flex; flex-direction: column; gap: 20px; }
+.agent-running .loading-state { min-height: 210px; height: auto; }
+.agent-inspector { margin-top: 28px; border-top: 1px solid var(--border-tech); padding-top: 20px; }
+.agent-meta-block { margin-bottom: 18px; padding: 14px; background: #0c0e12; border-left: 2px solid var(--accent-lime); }
+.meta-label { display: block; color: var(--accent-lime); font-size: 0.78rem; font-weight: 700; margin-bottom: 10px; }
+.agent-meta-block ol { padding-left: 20px; color: #c9cbd0; }
+.agent-meta-block li { margin: 7px 0; }
+.stage-list { display: flex; flex-wrap: wrap; gap: 8px; }
+.stage-list span, .quality-row span {
+  border: 1px solid var(--border-tech); border-radius: 4px; padding: 6px 8px; color: var(--text-sub); font-size: 0.78rem;
+}
+.quality-row { display: flex; flex-wrap: wrap; gap: 8px; }
+.follow-up-box { display: grid; grid-template-columns: 1fr auto; gap: 10px; margin-top: 24px; }
+.follow-up-box textarea { min-height: 76px; }
+.follow-up-box button {
+  align-self: stretch; min-width: 76px; border: 1px solid var(--accent-lime); border-radius: 4px;
+  background: rgba(197, 249, 70, 0.08); color: var(--accent-lime); cursor: pointer;
+}
+.feedback-row { display: flex; align-items: center; gap: 8px; margin-top: 18px; color: var(--text-sub); font-size: 0.85rem; }
+
 /* 登录框 */
 .auth-backdrop { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.8); backdrop-filter: blur(5px); z-index: 2000; display: flex; justify-content: center; align-items: center; }
 .auth-panel { width: 400px; max-width: 90vw; background: var(--bg-card); border: 1px solid var(--border-tech); border-top: 2px solid var(--accent-lime); box-shadow: 0 20px 50px rgba(0,0,0,0.8); display: flex; flex-direction: column; animation: slideUpFade 0.3s forwards; }
@@ -925,6 +1226,33 @@ html, body, #app {
 }
 .project-card:hover .delete-btn { opacity: 1; }
 .delete-btn:hover { color: #ff4757; transform: scale(1.2) rotate(90deg); }
+
+@media (max-width: 720px) {
+  .navbar { padding: 0.8rem 0; }
+  .nav-content { padding: 0 1rem; }
+  .brand-do, .brand-video { font-size: 1.25rem; }
+  .status-pill { display: none; }
+  .auth-btn { padding: 6px 10px; }
+  .main-container { padding: 2.5rem 1rem; }
+  .hero-section { margin-bottom: 3rem; }
+  .slogan-main { font-size: 2rem; }
+  .slogan-sub { margin-bottom: 2rem; }
+  .upload-magnet { height: auto; min-height: 420px; border-radius: 8px; }
+  .split-container { flex-direction: column; }
+  .skew-pane, .pane-local, .pane-url { min-height: 210px; margin: 0; padding: 0; transform: none; }
+  .pane-local { border-right: 0; border-bottom: 1px solid var(--accent-lime); }
+  .pane-content, .skew-pane:hover .pane-content { transform: none; }
+  .split-gap { display: none; }
+  .card-grid { grid-template-columns: 1fr; }
+  .action-dock { grid-template-columns: 1fr; }
+  .filename-mask { max-width: 55vw; }
+  .sidebar-panel { width: 100%; max-width: 100vw; right: -100vw; }
+  .sidebar-header { padding: 16px 18px; }
+  .sidebar-title { font-size: 1rem; max-width: calc(100vw - 70px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .sidebar-body { padding: 20px 16px; }
+  .follow-up-box { grid-template-columns: 1fr; }
+  .follow-up-box button { min-height: 44px; }
+}
 
 @keyframes spin { to { transform: rotate(360deg); } }
 @keyframes slideUpFade { from { opacity: 0; transform: translateY(40px); } to { opacity: 1; transform: translateY(0); } }

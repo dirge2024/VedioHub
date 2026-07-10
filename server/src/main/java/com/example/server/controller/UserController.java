@@ -11,8 +11,6 @@ import java.util.Map;
 
 @RestController
 @RequestMapping("/user")
-//加上这个是为了防止跨域问题漏网
-@CrossOrigin(originPatterns = "*", allowCredentials = "true")
 public class UserController {
 
     @Autowired(required = false)
@@ -23,6 +21,12 @@ public class UserController {
     public Map<String, Object> register(@RequestBody User user) {
         Map<String, Object> result = new HashMap<>();
         try {
+            if (user.getUsername() == null || user.getUsername().isBlank()
+                    || user.getPassword() == null || user.getPassword().length() < 6) {
+                result.put("code", 400);
+                result.put("msg", "账号不能为空，密码至少 6 位");
+                return result;
+            }
             //打印日志，确认数据进来了
             System.out.println("收到注册请求: " + user.getUsername());
 
@@ -49,12 +53,13 @@ public class UserController {
 
             result.put("code", 200);
             result.put("msg", "注册成功");
+            user.setPassword(null);
             result.put("data", user);
         } catch (Exception e) {
             //如果在黑窗口看到这个报错，就知道原因了
             e.printStackTrace();
             result.put("code", 500);
-            result.put("msg", "后端报错: " + e.getMessage());
+            result.put("msg", "注册服务暂时不可用");
         }
         return result;
     }
@@ -64,6 +69,12 @@ public class UserController {
     public Map<String, Object> login(@RequestBody User loginUser) {
         Map<String, Object> result = new HashMap<>();
         try {
+            if (loginUser.getUsername() == null || loginUser.getUsername().isBlank()
+                    || loginUser.getPassword() == null || loginUser.getPassword().isBlank()) {
+                result.put("code", 400);
+                result.put("msg", "请输入账号和密码");
+                return result;
+            }
             System.out.println("收到登录请求: " + loginUser.getUsername());
 
             QueryWrapper<User> query = new QueryWrapper<>();
@@ -79,12 +90,13 @@ public class UserController {
                 result.put("code", 200);
                 result.put("msg", "登录成功");
                 result.put("token", "user_" + dbUser.getId());
+                dbUser.setPassword(null);
                 result.put("userInfo", dbUser);
             }
         } catch (Exception e) {
             e.printStackTrace();
             result.put("code", 500);
-            result.put("msg", "登录报错: " + e.getMessage());
+            result.put("msg", "登录服务暂时不可用");
         }
         return result;
     }

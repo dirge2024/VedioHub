@@ -6,6 +6,7 @@ import org.springframework.stereotype.Component;
 import java.io.BufferedReader;
 import java.io.File;
 import java.io.InputStreamReader;
+import java.net.URI;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
@@ -20,6 +21,17 @@ public class YtDlpUtils {
     private String ffmpegDir;
 
     public File downloadVideo(String url) throws Exception {
+        URI source = URI.create(url);
+        String scheme = source.getScheme();
+        String host = source.getHost();
+        if (host == null
+                || !("http".equalsIgnoreCase(scheme) || "https".equalsIgnoreCase(scheme))
+                || "localhost".equalsIgnoreCase(host)
+                || "127.0.0.1".equals(host)
+                || "::1".equals(host)) {
+            throw new IllegalArgumentException("仅支持合法的公网 HTTP/HTTPS 视频链接");
+        }
+
         String tempDir = System.getProperty("java.io.tmpdir");
         String outputName = UUID.randomUUID().toString() + ".mp4";
         String outputPath = tempDir + File.separator + outputName;
@@ -42,14 +54,15 @@ public class YtDlpUtils {
         command.add("--recode-video");
         command.add("mp4");
 
-        command.add("--ffmpeg-location");
-        command.add(ffmpegDir);
+        if (ffmpegDir != null && !ffmpegDir.isBlank()) {
+            command.add("--ffmpeg-location");
+            command.add(ffmpegDir);
+        }
 
         command.add("-o");
         command.add(outputPath);
 
-        //忽略证书和播放列表
-        command.add("--no-check-certificate");
+        //只处理单个视频，避免误下载整个播放列表
         command.add("--no-playlist");
 
         command.add(url);

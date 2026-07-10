@@ -43,14 +43,14 @@ public class MediaService {
     @Autowired
     private MinioUtils minioUtils;
 
-    private final String UPLOAD_DIR = "D:/Project/MediaApp/uploads/";
+    private static final Path LEGACY_UPLOAD_DIR = Path.of(System.getProperty("java.io.tmpdir"), "dovideo-uploads");
     private static final String CHUNK_UPLOAD_KEY_PREFIX = "upload:chunked:";
     private static final String MEDIA_MD5_KEY_PREFIX = "media:md5:";
+    private static final long MAX_CHUNK_BYTES = 5L * 1024 * 1024;
     private static final Path CHUNK_UPLOAD_DIR = Path.of(System.getProperty("java.io.tmpdir"), "dovideo-chunks");
 
     public MediaService() {
-        File dir = new File(UPLOAD_DIR);
-        if (!dir.exists()) dir.mkdirs();
+        LEGACY_UPLOAD_DIR.toFile().mkdirs();
     }
 
     public String initChunkedUpload(String filename, int totalChunks, Long userId) throws IOException {
@@ -90,6 +90,9 @@ public class MediaService {
     public void uploadChunk(String uploadId, int chunkIndex, int totalChunks, MultipartFile chunk) throws IOException {
         if (chunk == null || chunk.isEmpty()) {
             throw new IllegalArgumentException("chunk is empty");
+        }
+        if (chunk.getSize() > MAX_CHUNK_BYTES) {
+            throw new IllegalArgumentException("chunk size cannot exceed 5MB");
         }
 
         Map<Object, Object> metadata = requireUpload(uploadId);
@@ -250,8 +253,8 @@ public class MediaService {
 
         // --- 下面是原有的文件处理逻辑 ---
         String fileId = UUID.randomUUID().toString();
-        String inputPath = UPLOAD_DIR + fileId + "_input.mp4";
-        String outputPath = UPLOAD_DIR + fileId + "_output.mp3";
+        String inputPath = LEGACY_UPLOAD_DIR.resolve(fileId + "_input.mp4").toString();
+        String outputPath = LEGACY_UPLOAD_DIR.resolve(fileId + "_output.mp3").toString();
 
         File inputFile = new File(inputPath);
         file.transferTo(inputFile);

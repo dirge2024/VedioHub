@@ -32,7 +32,6 @@ import java.util.concurrent.TimeUnit; //导入时间单位
 
 @RestController
 @RequestMapping("/debug")
-@CrossOrigin(originPatterns = "*", allowCredentials = "true")
 public class DebugController {
 
     @Autowired
@@ -96,11 +95,12 @@ public class DebugController {
             if (contentHash == null || !contentHash.matches("[a-f0-9]{32}")) {
                 contentHash = "media-" + id;
             }
-            activeKey = "analysis:active:" + contentHash;
+            String goalDigest = UUID.nameUUIDFromBytes(goal.trim().getBytes(StandardCharsets.UTF_8)).toString();
+            activeKey = "analysis:active:" + contentHash + ":" + goalDigest;
             Boolean accepted = redisTemplate.opsForValue()
                     .setIfAbsent(activeKey, String.valueOf(id), 2, TimeUnit.HOURS);
             if (!Boolean.TRUE.equals(accepted)) {
-                return "⚠️ 相同视频正在分析，请勿重复提交！";
+                return "⚠️ 相同视频和分析目标正在处理中，请勿重复提交！";
             }
 
             //更新状态

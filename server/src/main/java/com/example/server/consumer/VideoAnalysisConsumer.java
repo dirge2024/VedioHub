@@ -12,8 +12,8 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Component;
 
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.Executor;
+import java.nio.charset.StandardCharsets;
+import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 
 @Component
@@ -26,10 +26,6 @@ public class VideoAnalysisConsumer implements RocketMQListener<AnalysisTaskMsg> 
 
     @Autowired
     private MediaFileMapper mediaFileMapper;
-
-    //注入之前配置好的 IO 密集型线程池
-    @Autowired
-    private Executor aiTaskExecutor;
 
     @Autowired
     private RedissonClient redissonClient;
@@ -44,42 +40,31 @@ public class VideoAnalysisConsumer implements RocketMQListener<AnalysisTaskMsg> 
         if (contentHash == null || !contentHash.matches("([a-f0-9]{32}|media-\\d+)")) {
             contentHash = "media-" + mediaId;
         }
-        String lockKey = "lock:analysis:" + contentHash;
-        String activeKey = "analysis:active:" + contentHash;
-        String completedKey = "analysis:completed:" + mediaId + ":"
-                + Integer.toHexString(String.valueOf(msg.getUserGoal()).hashCode());
-        System.out.println("⚡ [MQ消费者] 收到任务 ID: " + mediaId + "，准备派发给线程池...");
-
-        //CompletableFuture异步编排
-        //即使MQ消费者线程很快，我们也不阻塞它，而是把重活扔给业务线程池
-        CompletableFuture.runAsync(() -> {
-            System.out.println("🧵 [线程池] 开始执行 DeepSeek 分析逻辑...");
-            RLock lock = redissonClient.getLock(lockKey);
-            boolean acquired = false;
-            try {
-                acquired = lock.tryLock(0, -1, TimeUnit.SECONDS);
-                if (!acquired) {
-                    System.out.println("相同视频正在处理中，跳过重复消息: " + mediaId);
-                    return;
-                }
-                if (Boolean.TRUE.equals(redisTemplate.hasKey(completedKey))) {
-                    System.out.println("任务已经完成，跳过重复消费: " + mediaId);
-                    return;
-                }
-                aiService.asyncAnalyze(mediaId, msg.getUserGoal());
-                redisTemplate.opsForValue().set(completedKey, "1");
-            } catch (Exception e) {
-                System.err.println("❌ 任务执行失败: " + e.getMessage());
-                markAsFailed(mediaId, e.getMessage());
-            } finally {
-                if (acquired) {
-                    redisTemplate.delete(activeKey);
-                    if (lock.isHeldByCurrentThread()) {
-                        lock.unlock();
-                    }
+        String goalDigest = UUID.nameUUIDFromBytes(
+                String.valueOf(msg.getUserGoal()).trim().getBytes(StandardCharsets.UTF_8)).toString();
+        String lockKey = "lock:analysis:" + contentHash + ":" + goalDigest;
+        String activeKey = "analysis:active:" + contentHash + ":" + goalDigest;
+        String completedKey = "analysis:completed:" + mediaId + ":" + goalDigest;
+        RLock lock = redissonClient.getLock(lockKey);
+        boolean acquired = false;
+        try {
+            acquired = lock.tryLock(0, -1, TimeUnit.SECONDS);
+            if (!acquired || Boolean.TRUE.equals(redisTemplate.hasKey(completedKey))) {
+                return;
+            }
+            aiService.asyncAnalyze(mediaId, msg.getUserGoal());
+            redisTemplate.opsForValue().set(completedKey, "1", 7, TimeUnit.DAYS);
+        } catch (Exception e) {
+            markAsFailed(mediaId, e.getMessage());
+            throw new IllegalStateException("视频分析消费失败，交由 RocketMQ 重试", e);
+        } finally {
+            if (acquired) {
+                redisTemplate.delete(activeKey);
+                if (lock.isHeldByCurrentThread()) {
+                    lock.unlock();
                 }
             }
-        }, aiTaskExecutor);
+        }
     }
 
     private void markAsFailed(Long id, String error) {

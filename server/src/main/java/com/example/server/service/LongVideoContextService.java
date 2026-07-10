@@ -36,7 +36,7 @@ public class LongVideoContextService {
         }
 
         List<VideoChunk> chunks = buildChunks(context.segments());
-        List<Double> queryEmbedding = embeddingUtils.embed(context.userGoal());
+        List<Double> queryEmbedding = safeEmbed(context.userGoal());
 
         List<VideoChunk> rankedChunks = chunks.stream()
                 .sorted(Comparator.comparingDouble(
@@ -115,7 +115,7 @@ public class LongVideoContextService {
                     summary.segmentSummary(),
                     summary.keywords(),
                     rawSegments,
-                    embeddingUtils.embed(embeddingText)
+                    safeEmbed(embeddingText)
             ));
         }
         return chunks;
@@ -143,5 +143,14 @@ public class LongVideoContextService {
         }
         if (leftLength == 0 || rightLength == 0) return 0;
         return dot / (Math.sqrt(leftLength) * Math.sqrt(rightLength));
+    }
+
+    private List<Double> safeEmbed(String text) {
+        try {
+            return embeddingUtils.embed(text);
+        } catch (RuntimeException e) {
+            telemetry.incrementCurrent("embeddingFallbacks", 1);
+            return List.of();
+        }
     }
 }

@@ -17,12 +17,12 @@ import org.springframework.web.multipart.MultipartFile;
 import java.io.File;
 import java.time.LocalDateTime;
 import java.util.List;
+import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
 
 @RestController
 @RequestMapping("/media")
-@CrossOrigin(originPatterns = "*", allowCredentials = "true")
 public class MediaController {
 
     @Autowired(required = false)
@@ -229,7 +229,7 @@ public class MediaController {
         MediaFile media = mediaFileMapper.selectById(id);
         if (media == null) return "文件不存在";
 
-        if (userId != null && !media.getUserId().equals(userId)) {
+        if (userId != null && !Objects.equals(media.getUserId(), userId)) {
             return "无权删除他人的文件";
         }
 

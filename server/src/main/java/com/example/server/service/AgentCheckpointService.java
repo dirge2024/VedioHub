@@ -8,7 +8,10 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 
+import java.nio.charset.StandardCharsets;
 import java.util.List;
+import java.util.UUID;
+import java.util.concurrent.TimeUnit;
 
 @Service
 public class AgentCheckpointService {
@@ -36,7 +39,8 @@ public class AgentCheckpointService {
     }
 
     public void saveContext(Long mediaId, VideoContext context) {
-        write(checkpointKey(mediaId), "context", "CONTEXT_COMPLETED", context);
+        VideoContext reusableContext = new VideoContext(context.source(), "", context.segments());
+        write(checkpointKey(mediaId), "context", "CONTEXT_COMPLETED", reusableContext);
     }
 
     public void saveResult(Long mediaId, AgentState state) {
@@ -65,6 +69,7 @@ public class AgentCheckpointService {
         try {
             redisTemplate.opsForList().rightPush(
                     feedbackKey(feedback.mediaId()), objectMapper.writeValueAsString(feedback.normalized()));
+            redisTemplate.expire(feedbackKey(feedback.mediaId()), 30, TimeUnit.DAYS);
         } catch (Exception e) {
             throw new IllegalStateException("保存 Agent 用户反馈失败", e);
         }
@@ -91,6 +96,7 @@ public class AgentCheckpointService {
         redisTemplate.opsForHash().put(key, "stage", "FAILED");
         redisTemplate.opsForHash().put(key, "failedStage", failedStage);
         redisTemplate.opsForHash().put(key, "error", String.valueOf(error.getMessage()));
+        redisTemplate.expire(key, 7, TimeUnit.DAYS);
     }
 
     private <T> T read(String key, String field, Class<T> type) {
@@ -106,6 +112,7 @@ public class AgentCheckpointService {
         try {
             redisTemplate.opsForHash().put(key, field, objectMapper.writeValueAsString(value));
             redisTemplate.opsForHash().put(key, "stage", stage);
+            redisTemplate.expire(key, 7, TimeUnit.DAYS);
         } catch (Exception e) {
             throw new IllegalStateException("保存 Agent Checkpoint 失败", e);
         }
@@ -116,7 +123,9 @@ public class AgentCheckpointService {
     }
 
     private String goalKey(Long mediaId, String goal) {
-        return checkpointKey(mediaId) + ":goal:" + Integer.toHexString(String.valueOf(goal).hashCode());
+        String digest = UUID.nameUUIDFromBytes(
+                String.valueOf(goal).trim().getBytes(StandardCharsets.UTF_8)).toString();
+        return checkpointKey(mediaId) + ":goal:" + digest;
     }
 
     private String feedbackKey(Long mediaId) {

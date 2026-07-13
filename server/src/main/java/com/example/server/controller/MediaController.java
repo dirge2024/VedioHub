@@ -3,9 +3,8 @@ package com.example.server.controller;
 import com.example.server.dto.MediaSummary;
 import com.example.server.service.AuthService;
 import com.example.server.service.ChunkUploadService;
+import com.example.server.service.MediaIngestService;
 import com.example.server.service.MediaService;
-import com.example.server.utils.MinioUtils;
-import com.example.server.utils.YtDlpUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
@@ -19,7 +18,6 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.multipart.MultipartFile;
 
-import java.io.File;
 import java.util.List;
 import java.util.Set;
 
@@ -29,18 +27,15 @@ public class MediaController {
 
     private static final Logger log = LoggerFactory.getLogger(MediaController.class);
 
-    private final MinioUtils minioUtils;
-    private final YtDlpUtils ytDlpUtils;
     private final ChunkUploadService chunkUploadService;
+    private final MediaIngestService mediaIngestService;
     private final MediaService mediaService;
 
-    public MediaController(MinioUtils minioUtils,
-                           YtDlpUtils ytDlpUtils,
-                           ChunkUploadService chunkUploadService,
+    public MediaController(ChunkUploadService chunkUploadService,
+                           MediaIngestService mediaIngestService,
                            MediaService mediaService) {
-        this.minioUtils = minioUtils;
-        this.ytDlpUtils = ytDlpUtils;
         this.chunkUploadService = chunkUploadService;
+        this.mediaIngestService = mediaIngestService;
         this.mediaService = mediaService;
     }
 
@@ -104,14 +99,8 @@ public class MediaController {
     @PostMapping("/upload")
     public ResponseEntity<String> upload(@RequestParam("file") MultipartFile file,
                                          @RequestAttribute(AuthService.REQUEST_USER_ID) Long userId) {
-        if (file == null || file.isEmpty()) {
-            return ResponseEntity.badRequest().body("Upload failed: file is empty");
-        }
         try {
-            String filename = mediaService.normalizeVideoFilename(file.getOriginalFilename());
-            String md5 = mediaService.calculateMd5(file);
-            String fileUrl = minioUtils.uploadFile(file);
-            mediaService.saveUploadedMedia(filename, fileUrl, userId, md5);
+            mediaIngestService.ingestFile(file, userId);
             return ResponseEntity.ok("Upload success");
         } catch (IllegalArgumentException e) {
             return ResponseEntity.badRequest().body(e.getMessage());
@@ -124,26 +113,14 @@ public class MediaController {
     @PostMapping("/upload-url")
     public ResponseEntity<String> uploadUrl(@RequestParam("url") String url,
                                             @RequestAttribute(AuthService.REQUEST_USER_ID) Long userId) {
-        if (url == null || url.isBlank()) {
-            return ResponseEntity.badRequest().body("Upload failed: url is empty");
-        }
-
-        File tempFile = null;
         try {
-            tempFile = ytDlpUtils.downloadVideo(url);
-            String md5 = mediaService.calculateMd5(tempFile);
-            String fileUrl = minioUtils.uploadLocalFile(tempFile);
-            mediaService.saveUploadedMedia("WEB_" + tempFile.getName(), fileUrl, userId, md5);
+            mediaIngestService.ingestUrl(url, userId);
             return ResponseEntity.ok("Upload success");
         } catch (IllegalArgumentException e) {
             return ResponseEntity.badRequest().body(e.getMessage());
         } catch (Exception e) {
             log.error("url_upload_failed userId={}", userId, e);
             return ResponseEntity.internalServerError().body("Upload failed");
-        } finally {
-            if (tempFile != null && tempFile.exists() && !tempFile.delete()) {
-                log.warn("temporary_video_cleanup_failed path={}", tempFile.getAbsolutePath());
-            }
         }
     }
 

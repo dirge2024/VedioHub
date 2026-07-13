@@ -67,6 +67,7 @@ public class VideoContextService {
         Path workDir = Path.of(System.getProperty("java.io.tmpdir"), "video-context-" + UUID.randomUUID());
         try {
             Files.createDirectories(workDir);
+            // 两条分支各跑各的，单路挂掉还能带着另一半信息继续往下走。
             CompletableFuture<BranchResult<TranscriptPart>> transcriptFuture = submitBranch(
                     asrExecutor,
                     () -> transcribeBySegments(readableVideoPath, workDir.resolve("audio"), traceId));

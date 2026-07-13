@@ -95,9 +95,10 @@ public class VideoAnalysisConsumer implements RocketMQListener<AnalysisTaskMsg> 
             }
             aiService.asyncAnalyze(mediaId, msg.getUserGoal());
             redisTemplate.opsForValue().set(
-                    completedKey, String.valueOf(mediaId), java.time.Duration.ofDays(7));
+                    completedKey, String.valueOf(mediaId), Duration.ofDays(7));
         } catch (Exception e) {
             if (acquired && attempt > 0 && attempt < MAX_DELIVERY_ATTEMPTS) {
+                // 重试期间 active 不能掉，不然前端会以为任务结束，又塞进来一份相同工作。
                 retrying = true;
                 redisTemplate.expire(activeKey, ACTIVE_TTL);
                 log.warn("video_analysis_retry_scheduled mediaId={} attempt={}", mediaId, attempt, e);
@@ -105,6 +106,7 @@ public class VideoAnalysisConsumer implements RocketMQListener<AnalysisTaskMsg> 
             }
             if (acquired && attempt >= MAX_DELIVERY_ATTEMPTS) {
                 try {
+                    // 到这里就别无限重放了，原消息留到失败主题，后面排查还有抓手。
                     rocketMQTemplate.convertAndSend(deadLetterTopic, msg);
                     log.error("video_analysis_dead_lettered mediaId={} attempts={}", mediaId, attempt, e);
                     return;

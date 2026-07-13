@@ -12,17 +12,20 @@ import org.slf4j.LoggerFactory;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.concurrent.TimeUnit;
 
 @Service
 public class AgentCheckpointService {
 
     private static final Logger log = LoggerFactory.getLogger(AgentCheckpointService.class);
     private static final int MAX_FEEDBACK_SAMPLES = 200;
+    private static final Duration CHECKPOINT_TTL = Duration.ofDays(7);
+    private static final Duration REVISION_TTL = Duration.ofHours(2);
+    private static final Duration FEEDBACK_TTL = Duration.ofDays(30);
 
     private final StringRedisTemplate redisTemplate;
     private final ObjectMapper objectMapper;
@@ -103,7 +106,7 @@ public class AgentCheckpointService {
             if (plan != null) {
                 redisTemplate.opsForHash().put(key, "plan", objectMapper.writeValueAsString(plan));
             }
-            redisTemplate.expire(key, 2, TimeUnit.HOURS);
+            redisTemplate.expire(key, REVISION_TTL);
             rememberGoalKey(mediaId, key);
         } catch (Exception e) {
             throw new IllegalStateException("暂存 Agent 修正计划失败", e);
@@ -130,7 +133,7 @@ public class AgentCheckpointService {
             redisTemplate.opsForList().rightPush(
                     feedbackKey(feedback.mediaId()), objectMapper.writeValueAsString(feedback.normalized()));
             redisTemplate.opsForList().trim(feedbackKey(feedback.mediaId()), -MAX_FEEDBACK_SAMPLES, -1);
-            redisTemplate.expire(feedbackKey(feedback.mediaId()), 30, TimeUnit.DAYS);
+            redisTemplate.expire(feedbackKey(feedback.mediaId()), FEEDBACK_TTL);
         } catch (Exception e) {
             throw new IllegalStateException("保存 Agent 用户反馈失败", e);
         }
@@ -154,7 +157,7 @@ public class AgentCheckpointService {
         redisTemplate.opsForHash().put(key, "stage", "FAILED");
         redisTemplate.opsForHash().put(key, "failedStage", failedStage);
         redisTemplate.opsForHash().put(key, "errorType", error.getClass().getSimpleName());
-        redisTemplate.expire(key, 7, TimeUnit.DAYS);
+        redisTemplate.expire(key, CHECKPOINT_TTL);
         rememberGoalKey(mediaId, key);
     }
 
@@ -188,7 +191,7 @@ public class AgentCheckpointService {
             redisTemplate.opsForHash().putAll(key, Map.of(
                     field, objectMapper.writeValueAsString(value),
                     "stage", stage));
-            redisTemplate.expire(key, 7, TimeUnit.DAYS);
+            redisTemplate.expire(key, CHECKPOINT_TTL);
         } catch (Exception e) {
             throw new IllegalStateException("保存 Agent Checkpoint 失败", e);
         }
@@ -197,7 +200,7 @@ public class AgentCheckpointService {
     private void rememberGoalKey(Long mediaId, String key) {
         try {
             redisTemplate.opsForSet().add(goalIndexKey(mediaId), key);
-            redisTemplate.expire(goalIndexKey(mediaId), 7, TimeUnit.DAYS);
+            redisTemplate.expire(goalIndexKey(mediaId), CHECKPOINT_TTL);
         } catch (RuntimeException e) {
             log.warn("agent_checkpoint_index_write_failed mediaId={} key={}", mediaId, key, e);
         }

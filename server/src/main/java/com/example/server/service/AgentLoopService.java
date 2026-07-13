@@ -6,6 +6,9 @@ import com.example.server.dto.VideoContext;
 import com.example.server.utils.DeepSeekUtils;
 import org.springframework.stereotype.Service;
 
+import java.util.ArrayList;
+import java.util.List;
+
 @Service
 public class AgentLoopService {
 
@@ -104,22 +107,22 @@ public class AgentLoopService {
                                                            AgentState.CriticResult critique) {
         if (critique == null) {
             critique = new AgentState.CriticResult(
-                    false, java.util.List.of("Critic 未返回有效结果"),
-                    java.util.List.of(), java.util.List.of(), java.util.List.of());
+                    false, List.of("Critic 未返回有效结果"),
+                    List.of(), List.of(), List.of());
         }
-        java.util.List<String> invalidEvidence = result.evidence().stream()
+        List<AnalysisResult.Evidence> invalidEvidence = result.evidence().stream()
                 .filter(evidence -> !evidenceVerificationService.supported(context, evidence))
-                .map(evidence -> "证据无法在原始 ASR/OCR 中核验: " + evidence.timestampMs())
                 .toList();
         if (invalidEvidence.isEmpty()) return critique;
 
-        java.util.List<String> unsupported = new java.util.ArrayList<>(critique.unsupportedClaims());
-        unsupported.addAll(invalidEvidence);
-        java.util.List<String> feedback = new java.util.ArrayList<>(critique.feedback());
+        List<String> unsupported = new ArrayList<>(critique.unsupportedClaims());
+        invalidEvidence.stream()
+                .map(evidence -> "证据无法在原始 ASR/OCR 中核验: " + evidence.timestampMs())
+                .forEach(unsupported::add);
+        List<String> feedback = new ArrayList<>(critique.feedback());
         feedback.add("重新检索并绑定有效时间戳证据");
-        java.util.List<Long> requiredTimestamps = new java.util.ArrayList<>(critique.requiredTimestamps());
-        result.evidence().stream()
-                .filter(evidence -> !evidenceVerificationService.supported(context, evidence))
+        List<Long> requiredTimestamps = new ArrayList<>(critique.requiredTimestamps());
+        invalidEvidence.stream()
                 .map(AnalysisResult.Evidence::timestampMs)
                 .filter(timestamp -> !requiredTimestamps.contains(timestamp))
                 .forEach(requiredTimestamps::add);

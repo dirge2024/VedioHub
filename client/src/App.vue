@@ -301,6 +301,7 @@ import { apiRequest, clearAuthToken, hasAuthToken, setAuthToken } from './api'
 import { uploadVideoInChunks } from './chunkUpload'
 import { DEMO_EVALUATION, DEMO_ITEM, DEMO_PLAN, DEMO_RESULT, DEMO_TRACE } from './demoData'
 import { renderMarkdown } from './markdown'
+import { createTaskPolling } from './taskPolling'
 
 // --- 变量定义 ---
 const DEMO_MODE = new URLSearchParams(window.location.search).has('demo')
@@ -339,27 +340,8 @@ const authLoading = ref(false)
 const authMessage = ref('')
 const authError = ref(false)
 const authForm = ref({ username: '', password: '', nickname: '' })
-const pollingTimers = ref({})
+const taskPolling = createTaskPolling()
 const traceStages = computed(() => Object.entries(sidebar.value.trace?.stageDurationMs || {}))
-
-const pollingKey = (id, type) => `${type}:${id}`
-
-const stopPolling = (id, type) => {
-  const key = pollingKey(id, type)
-  const polling = pollingTimers.value[key]
-  if (!polling) return
-  clearInterval(polling.timer)
-  clearTimeout(polling.timeout)
-  delete pollingTimers.value[key]
-}
-
-const stopAllPolling = () => {
-  Object.values(pollingTimers.value).forEach(polling => {
-    clearInterval(polling.timer)
-    clearTimeout(polling.timeout)
-  })
-  pollingTimers.value = {}
-}
 
 const renderedMarkdown = computed(() => renderMarkdown(sidebar.value.content))
 
@@ -573,7 +555,7 @@ const transcribe = async (id) => {
     sidebar.value.loading = false
     return
   }
-  if (pollingTimers.value[pollingKey(id, 'text')]) {
+  if (taskPolling.has(id, 'text')) {
     openSidebar('text', '全量文字提取')
     sidebar.value.mediaId = id
     sidebar.value.loading = true
@@ -607,7 +589,7 @@ const transcribe = async (id) => {
 }
 
 const aiAnalyze = async (id, goal) => {
-  if (pollingTimers.value[pollingKey(id, 'ai')]) {
+  if (taskPolling.has(id, 'ai')) {
     sidebar.value.mode = 'result'
     sidebar.value.loading = true
     return
@@ -638,9 +620,7 @@ const aiAnalyze = async (id, goal) => {
 }
 
 const startPolling = (id, type, goal = '') => {
-  stopPolling(id, type)
-  const key = pollingKey(id, type)
-  const polling = { timer: null, timeout: null, type, inFlight: false, metaTick: 0 }
+  let metaTick = 0
 
   const finish = async (result, failed = false) => {
     if (sidebar.value.visible && sidebar.value.type === type && sidebar.value.mediaId === id) {
@@ -649,12 +629,10 @@ const startPolling = (id, type, goal = '') => {
       if (type === 'ai' && !failed) await refreshAgentMeta(id, goal, true)
     }
     showMsg(failed ? '任务执行失败，请稍后重试' : '任务完成', failed)
-    stopPolling(id, type)
+    taskPolling.stop(id, type)
   }
 
   const poll = async () => {
-    if (polling.inFlight || pollingTimers.value[key] !== polling) return
-    polling.inFlight = true
     try {
       if (type === 'ai') {
         const params = new URLSearchParams({ id: String(id), goal })
@@ -670,8 +648,8 @@ const startPolling = (id, type, goal = '') => {
           await finish(status.message || '分析失败', true)
           return
         }
-        polling.metaTick += 1
-        if (sidebar.value.mediaId === id && polling.metaTick % 4 === 0) {
+        metaTick += 1
+        if (sidebar.value.mediaId === id && metaTick % 4 === 0) {
           await refreshAgentMeta(id, goal, false)
         }
         return
@@ -687,21 +665,13 @@ const startPolling = (id, type, goal = '') => {
       }
     } catch (error) {
       console.error('task polling failed', error)
-    } finally {
-      polling.inFlight = false
     }
   }
 
-  polling.timer = setInterval(poll, 3000)
-  polling.timeout = setTimeout(() => {
-    if (pollingTimers.value[key] === polling) {
-      stopPolling(id, type)
-      showMsg('任务仍在后台执行，可稍后重新打开查看', true)
-      if (sidebar.value.mediaId === id) sidebar.value.loading = false
-    }
-  }, 300000)
-  pollingTimers.value[key] = polling
-  poll()
+  taskPolling.start(id, type, poll, () => {
+    showMsg('任务仍在后台执行，可稍后重新打开查看', true)
+    if (sidebar.value.mediaId === id) sidebar.value.loading = false
+  })
 }
 
 const openSidebar = (type, title) => {
@@ -940,7 +910,7 @@ const logout = () => {
   if (hasAuthToken()) {
     apiRequest('/user/logout', { method: 'POST' }).catch(() => {})
   }
-  stopAllPolling()
+  taskPolling.stopAll()
   currentUser.value = null
   localStorage.removeItem('user')
   clearAuthToken()
@@ -949,7 +919,7 @@ const logout = () => {
 }
 
 const handleAuthExpired = () => {
-  stopAllPolling()
+  taskPolling.stopAll()
   currentUser.value = null
   list.value = []
   sidebar.value.visible = false
@@ -977,7 +947,7 @@ onMounted(() => {
 })
 onUnmounted(() => {
   window.removeEventListener('auth-expired', handleAuthExpired)
-  stopAllPolling()
+  taskPolling.stopAll()
 })
 </script>
 

@@ -2,26 +2,17 @@ package com.example.server.controller;
 
 import com.example.server.dto.AgentFeedback;
 import com.example.server.dto.AgentState;
-import com.example.server.dto.AnalysisTaskMsg;
+import com.example.server.dto.TaskStatus;
 import com.example.server.entity.MediaFile;
 import com.example.server.service.AgentCheckpointService;
+import com.example.server.service.AnalysisDispatchService;
 import com.example.server.service.AgentEvaluationService;
 import com.example.server.service.AgentTelemetry;
 import com.example.server.service.AiService;
 import com.example.server.service.AuthService;
 import com.example.server.service.MediaService;
-import com.example.server.utils.AnalysisTaskKeys;
-import org.apache.rocketmq.spring.core.RocketMQTemplate;
-import org.redisson.api.RRateLimiter;
-import org.redisson.api.RateIntervalUnit;
-import org.redisson.api.RateType;
-import org.redisson.api.RedissonClient;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
-import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestAttribute;
@@ -30,7 +21,6 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
-import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 
@@ -38,40 +28,27 @@ import java.util.Map;
 @RequestMapping("/analysis")
 public class AnalysisController {
 
-    private static final Logger log = LoggerFactory.getLogger(AnalysisController.class);
     private static final int MAX_GOAL_LENGTH = 500;
-    private static final int USER_REQUESTS_PER_MINUTE = 5;
-    private static final int GLOBAL_REQUESTS_PER_MINUTE = 30;
-    private static final Duration ANALYSIS_ACTIVE_TTL = Duration.ofHours(6);
 
     private final AiService aiService;
+    private final AnalysisDispatchService dispatchService;
     private final AgentCheckpointService checkpointService;
     private final AgentEvaluationService evaluationService;
     private final AgentTelemetry telemetry;
     private final MediaService mediaService;
-    private final StringRedisTemplate redisTemplate;
-    private final RocketMQTemplate rocketMQTemplate;
-    private final RedissonClient redissonClient;
-    private final String analysisTopic;
 
     public AnalysisController(AiService aiService,
+                              AnalysisDispatchService dispatchService,
                               AgentCheckpointService checkpointService,
                               AgentEvaluationService evaluationService,
                               AgentTelemetry telemetry,
-                              MediaService mediaService,
-                              StringRedisTemplate redisTemplate,
-                              RocketMQTemplate rocketMQTemplate,
-                              RedissonClient redissonClient,
-                              @Value("${rocketmq.topic.video-analysis:video-analysis-topic}") String analysisTopic) {
+                              MediaService mediaService) {
         this.aiService = aiService;
+        this.dispatchService = dispatchService;
         this.checkpointService = checkpointService;
         this.evaluationService = evaluationService;
         this.telemetry = telemetry;
         this.mediaService = mediaService;
-        this.redisTemplate = redisTemplate;
-        this.rocketMQTemplate = rocketMQTemplate;
-        this.redissonClient = redissonClient;
-        this.analysisTopic = analysisTopic;
     }
 
     @PostMapping("/ai")
@@ -84,42 +61,7 @@ public class AnalysisController {
         if (checkpointService.loadResult(id, normalizedGoal) != null) {
             return ResponseEntity.ok("已有可复用的分析结果");
         }
-        return enqueueAnalysis(mediaFile, normalizedGoal, null);
-    }
-
-    private ResponseEntity<String> enqueueAnalysis(MediaFile mediaFile,
-                                                     String normalizedGoal,
-                                                     AgentFeedback revision) {
-        Long id = mediaFile.getId();
-
-        if (!tryAcquireAiQuota(mediaFile.getUserId())) {
-            return ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS).body("系统繁忙，请稍后再试");
-        }
-
-        String action = revision == null
-                ? AnalysisTaskMsg.START_ANALYSIS
-                : AnalysisTaskMsg.REVISE_ANALYSIS;
-        String contentHash = revision == null ? contentHash(id) : "media-" + id;
-        String goalDigest = AnalysisTaskKeys.goalDigest(normalizedGoal);
-        String activeKey = AnalysisTaskKeys.active(contentHash, goalDigest);
-        Boolean accepted = redisTemplate.opsForValue().setIfAbsent(
-                activeKey, String.valueOf(id), ANALYSIS_ACTIVE_TTL);
-        if (!Boolean.TRUE.equals(accepted)) {
-            return ResponseEntity.status(HttpStatus.CONFLICT).body("相同视频和分析目标正在处理中");
-        }
-
-        try {
-            if (revision != null) aiService.stageRevision(revision);
-            rocketMQTemplate.convertAndSend(
-                    analysisTopic,
-                    new AnalysisTaskMsg(id, action, contentHash, normalizedGoal));
-            return ResponseEntity.status(HttpStatus.ACCEPTED).body("任务已提交");
-        } catch (RuntimeException e) {
-            redisTemplate.delete(activeKey);
-            if (revision != null) aiService.cancelStagedRevision(id, normalizedGoal);
-            log.error("analysis_dispatch_failed mediaId={} userId={}", id, mediaFile.getUserId(), e);
-            return ResponseEntity.internalServerError().body("任务提交失败");
-        }
+        return submissionResponse(dispatchService.submit(mediaFile, normalizedGoal, null));
     }
 
     @PostMapping("/follow-up")
@@ -149,7 +91,7 @@ public class AnalysisController {
         validateFeedback(feedback);
         MediaFile mediaFile = mediaService.requireOwnedMedia(feedback.mediaId(), userId);
         String revisedGoal = aiService.revisionGoal(feedback);
-        return enqueueAnalysis(mediaFile, revisedGoal, feedback);
+        return submissionResponse(dispatchService.submit(mediaFile, revisedGoal, feedback));
     }
 
     @GetMapping("/agent-feedback")
@@ -182,11 +124,7 @@ public class AnalysisController {
         }
 
         String stage = checkpointService.loadStage(id, normalizedGoal);
-        String goalDigest = AnalysisTaskKeys.goalDigest(normalizedGoal);
-        boolean active = Boolean.TRUE.equals(redisTemplate.hasKey(
-                AnalysisTaskKeys.active(contentHash(id), goalDigest)))
-                || Boolean.TRUE.equals(redisTemplate.hasKey(
-                AnalysisTaskKeys.active("media-" + id, goalDigest)));
+        boolean active = dispatchService.isActive(id, normalizedGoal);
         if (active) {
             TaskStatus.State state = stage == null
                     ? TaskStatus.State.QUEUED
@@ -223,20 +161,15 @@ public class AnalysisController {
         return value.trim();
     }
 
-    private String contentHash(Long mediaId) {
-        return AnalysisTaskKeys.normalizeContentHash(
-                mediaId, redisTemplate.opsForValue().get("media:md5:" + mediaId));
-    }
-
-    private boolean tryAcquireAiQuota(Long userId) {
-        RRateLimiter userLimiter = redissonClient.getRateLimiter("limit:ai:user:" + userId);
-        userLimiter.trySetRate(RateType.OVERALL, USER_REQUESTS_PER_MINUTE, 1, RateIntervalUnit.MINUTES);
-        if (!userLimiter.tryAcquire()) return false;
-
-        RRateLimiter globalLimiter = redissonClient.getRateLimiter("limit:ai:global");
-        globalLimiter.trySetRate(
-                RateType.OVERALL, GLOBAL_REQUESTS_PER_MINUTE, 1, RateIntervalUnit.MINUTES);
-        return globalLimiter.tryAcquire();
+    private ResponseEntity<String> submissionResponse(AnalysisDispatchService.SubmissionResult result) {
+        return switch (result) {
+            case ACCEPTED -> ResponseEntity.status(HttpStatus.ACCEPTED).body("任务已提交");
+            case RATE_LIMITED -> ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS)
+                    .body("系统繁忙，请稍后再试");
+            case DUPLICATE -> ResponseEntity.status(HttpStatus.CONFLICT)
+                    .body("相同视频和分析目标正在处理中");
+            case FAILED -> ResponseEntity.internalServerError().body("任务提交失败");
+        };
     }
 
     private void validateFeedback(AgentFeedback feedback) {

@@ -142,6 +142,7 @@ public class ChunkUploadService {
             String fileUrl = minioUtils.uploadLocalFile(mergedFile.toFile(), filename);
             MediaFile mediaFile = mediaService.saveUploadedMedia(
                     filename, fileUrl, userId, HexFormat.of().formatHex(digest.digest()));
+            // 先记成功再清现场。清理失败或客户端重试，都不会再插一条媒体记录。
             redisTemplate.opsForValue().set(
                     completedKey(uploadId), String.valueOf(mediaFile.getId()), 1, TimeUnit.DAYS);
             cleanup(uploadId, mediaFile.getId());

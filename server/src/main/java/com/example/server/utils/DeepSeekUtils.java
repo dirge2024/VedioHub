@@ -16,6 +16,8 @@ import java.util.List;
 @Component
 public class DeepSeekUtils {
 
+    private static final int MAX_MODEL_ATTEMPTS = 3;
+
     private final ChatModel chatModel;
     private final ObjectMapper objectMapper;
     private final AgentTelemetry telemetry;
@@ -162,17 +164,36 @@ public class DeepSeekUtils {
     }
 
     private String chat(String stage, String prompt) {
-        long started = System.nanoTime();
+        RuntimeException lastError = null;
+        for (int attempt = 0; attempt < MAX_MODEL_ATTEMPTS; attempt++) {
+            long started = System.nanoTime();
+            try {
+                String response = chatModel.chat(prompt);
+                if (response == null || response.isBlank()) {
+                    throw new IllegalStateException("模型返回空响应");
+                }
+                telemetry.modelCall(stage, prompt, response,
+                        inputPricePerMillion, outputPricePerMillion, started);
+                return response;
+            } catch (RuntimeException e) {
+                lastError = e;
+                telemetry.incrementCurrent("modelCallFailures", 1);
+                if (attempt == MAX_MODEL_ATTEMPTS - 1) {
+                    telemetry.failCurrentStage(stage, started);
+                    break;
+                }
+                waitBeforeRetry(attempt);
+            }
+        }
+        throw new IllegalStateException("模型调用达到最大重试次数", lastError);
+    }
+
+    private void waitBeforeRetry(int attempt) {
         try {
-            String response = chatModel.chat(prompt);
-            if (response == null || response.isBlank()) throw new IllegalStateException("模型返回空响应");
-            telemetry.modelCall(stage, prompt, response,
-                    inputPricePerMillion, outputPricePerMillion, started);
-            return response;
-        } catch (RuntimeException e) {
-            telemetry.incrementCurrent("modelCallFailures", 1);
-            telemetry.failCurrentStage(stage, started);
-            throw e;
+            Thread.sleep(1_000L << attempt);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("模型重试被中断", e);
         }
     }
 }

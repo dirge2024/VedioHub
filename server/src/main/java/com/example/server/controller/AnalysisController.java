@@ -209,7 +209,9 @@ public class AnalysisController {
         String stage = checkpointService.loadStage(id, normalizedGoal);
         String goalDigest = AnalysisTaskKeys.goalDigest(normalizedGoal);
         boolean active = Boolean.TRUE.equals(redisTemplate.hasKey(
-                AnalysisTaskKeys.active(contentHash(id), goalDigest)));
+                AnalysisTaskKeys.active(contentHash(id), goalDigest)))
+                || Boolean.TRUE.equals(redisTemplate.hasKey(
+                AnalysisTaskKeys.active("media-" + id, goalDigest)));
         if (active) {
             TaskStatus.State state = stage == null
                     ? TaskStatus.State.QUEUED

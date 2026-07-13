@@ -19,6 +19,7 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.security.DigestOutputStream;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -116,7 +117,9 @@ public class MediaService {
 
         Path directory = uploadDirectory(uploadId);
         Files.createDirectories(directory);
-        chunk.transferTo(chunkPath(directory, chunkIndex));
+        try (InputStream inputStream = chunk.getInputStream()) {
+            Files.copy(inputStream, chunkPath(directory, chunkIndex), StandardCopyOption.REPLACE_EXISTING);
+        }
         redisTemplate.opsForSet().add(partsKey(uploadId), String.valueOf(chunkIndex));
         redisTemplate.expire(CHUNK_UPLOAD_KEY_PREFIX + uploadId, 1, TimeUnit.DAYS);
         redisTemplate.expire(partsKey(uploadId), 1, TimeUnit.DAYS);

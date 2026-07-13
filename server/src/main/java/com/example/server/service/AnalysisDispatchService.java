@@ -3,6 +3,7 @@ package com.example.server.service;
 import com.example.server.dto.AgentFeedback;
 import com.example.server.dto.AnalysisTaskMsg;
 import com.example.server.dto.TaskStatus;
+import com.example.server.dto.TaskStage;
 import com.example.server.entity.MediaFile;
 import com.example.server.utils.AnalysisTaskKeys;
 import org.apache.rocketmq.spring.core.RocketMQTemplate;
@@ -71,7 +72,7 @@ public class AnalysisDispatchService {
                     analysisTopic,
                     new AnalysisTaskMsg(mediaId, action, contentHash, goal));
             taskEventService.publishAnalysis(mediaId, goal,
-                    TaskStatus.of(TaskStatus.State.QUEUED, "任务已进入异步分析队列"), "QUEUED");
+                    TaskStatus.of(TaskStatus.State.QUEUED, "任务已进入异步分析队列"), TaskStage.QUEUED);
             return SubmissionResult.ACCEPTED;
         } catch (RuntimeException e) {
             redisTemplate.delete(activeKey);

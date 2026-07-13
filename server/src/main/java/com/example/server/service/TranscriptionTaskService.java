@@ -1,6 +1,7 @@
 package com.example.server.service;
 
 import com.example.server.dto.TaskStatus;
+import com.example.server.dto.TaskStage;
 import com.example.server.entity.MediaFile;
 import com.example.server.mapper.MediaFileMapper;
 import org.slf4j.Logger;
@@ -40,7 +41,7 @@ public class TranscriptionTaskService {
         if (!Boolean.TRUE.equals(accepted)) return false;
         setState(mediaId, TaskStatus.State.QUEUED, ACTIVE_TTL);
         taskEventService.publishTranscription(mediaId,
-                TaskStatus.of(TaskStatus.State.QUEUED, "文字提取任务已排队"), "QUEUED");
+                TaskStatus.of(TaskStatus.State.QUEUED, "文字提取任务已排队"), TaskStage.QUEUED);
         return true;
     }
 
@@ -55,19 +56,19 @@ public class TranscriptionTaskService {
         try {
             setState(mediaId, TaskStatus.State.PROCESSING, ACTIVE_TTL);
             taskEventService.publishTranscription(mediaId,
-                    TaskStatus.of(TaskStatus.State.PROCESSING, "正在识别视频语音"), "ASR");
+                    TaskStatus.of(TaskStatus.State.PROCESSING, "正在识别视频语音"), TaskStage.ASR);
             mediaFile.setTranscriptText(videoTranscriptionService.transcribe(
                     mediaService.readableSource(mediaFile.getFilePath())));
             mediaFileMapper.updateById(mediaFile);
             mediaService.invalidateUserList(mediaFile.getUserId());
             setState(mediaId, TaskStatus.State.COMPLETED, Duration.ofDays(7));
             taskEventService.publishTranscription(mediaId,
-                    TaskStatus.completed(mediaFile.getTranscriptText()), "COMPLETED");
+                    TaskStatus.completed(mediaFile.getTranscriptText()), TaskStage.COMPLETED);
             log.info("transcription_completed mediaId={}", mediaId);
         } catch (Exception e) {
             setState(mediaId, TaskStatus.State.FAILED, Duration.ofHours(1));
             taskEventService.publishTranscription(mediaId,
-                    TaskStatus.of(TaskStatus.State.FAILED, "文字提取失败，请稍后重试"), "FAILED");
+                    TaskStatus.of(TaskStatus.State.FAILED, "文字提取失败，请稍后重试"), TaskStage.FAILED);
             log.error("transcription_failed mediaId={}", mediaId, e);
         } finally {
             clearActive(mediaId);
@@ -78,7 +79,7 @@ public class TranscriptionTaskService {
         clearActive(mediaId);
         setState(mediaId, TaskStatus.State.FAILED, Duration.ofMinutes(10));
         taskEventService.publishTranscription(mediaId,
-                TaskStatus.of(TaskStatus.State.FAILED, "任务队列已满，请稍后重试"), "DISPATCH_FAILED");
+                TaskStatus.of(TaskStatus.State.FAILED, "任务队列已满，请稍后重试"), TaskStage.DISPATCH_FAILED);
     }
 
     public TaskStatus status(MediaFile mediaFile) {

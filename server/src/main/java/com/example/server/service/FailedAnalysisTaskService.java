@@ -3,6 +3,7 @@ package com.example.server.service;
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.example.server.dto.AnalysisTaskMsg;
 import com.example.server.dto.TaskStatus;
+import com.example.server.dto.TaskStage;
 import com.example.server.entity.FailedAnalysisTask;
 import com.example.server.mapper.FailedAnalysisTaskMapper;
 import com.example.server.utils.AnalysisTaskKeys;
@@ -20,6 +21,8 @@ import java.util.NoSuchElementException;
 public class FailedAnalysisTaskService {
 
     private static final Duration ACTIVE_TTL = Duration.ofHours(6);
+    private static final String STATUS_FAILED = "FAILED";
+    private static final String STATUS_REQUEUED = "REQUEUED";
 
     private final FailedAnalysisTaskMapper taskMapper;
     private final RocketMQTemplate rocketMQTemplate;
@@ -50,7 +53,7 @@ public class FailedAnalysisTaskService {
         task.setAttemptCount((int) attempts);
         task.setErrorType(root.getClass().getSimpleName());
         task.setErrorMessage(truncate(root.getMessage(), 1_000));
-        task.setStatus("FAILED");
+        task.setStatus(STATUS_FAILED);
         task.setCreatedAt(LocalDateTime.now());
         task.setUpdatedAt(LocalDateTime.now());
         taskMapper.insert(task);
@@ -65,8 +68,8 @@ public class FailedAnalysisTaskService {
     public void replay(Long id) {
         FailedAnalysisTask task = taskMapper.selectById(id);
         if (task == null) throw new NoSuchElementException("失败任务不存在");
-        if (!"FAILED".equals(task.getStatus())) {
-            throw new IllegalStateException("该失败任务已经重放");
+        if (!STATUS_FAILED.equals(task.getStatus())) {
+            throw new IllegalArgumentException("该失败任务已经重放");
         }
 
         String contentHash = AnalysisTaskKeys.normalizeContentHash(task.getMediaId(), task.getContentHash());
@@ -74,18 +77,18 @@ public class FailedAnalysisTaskService {
         String activeKey = AnalysisTaskKeys.active(contentHash, goalDigest);
         Boolean accepted = redisTemplate.opsForValue().setIfAbsent(
                 activeKey, String.valueOf(task.getMediaId()), ACTIVE_TTL);
-        if (!Boolean.TRUE.equals(accepted)) throw new IllegalStateException("相同任务正在处理中");
+        if (!Boolean.TRUE.equals(accepted)) throw new IllegalArgumentException("相同任务正在处理中");
 
         try {
             redisTemplate.delete(AnalysisTaskKeys.attempts(contentHash, goalDigest));
             rocketMQTemplate.convertAndSend(analysisTopic, new AnalysisTaskMsg(
                     task.getMediaId(), task.getAction(), contentHash, task.getUserGoal()));
-            task.setStatus("REQUEUED");
+            task.setStatus(STATUS_REQUEUED);
             task.setUpdatedAt(LocalDateTime.now());
             taskMapper.updateById(task);
             taskEventService.publishAnalysis(task.getMediaId(), task.getUserGoal(),
                     TaskStatus.of(TaskStatus.State.QUEUED, "失败任务已由管理员重新入队"),
-                    "MANUAL_REPLAY");
+                    TaskStage.MANUAL_REPLAY);
         } catch (RuntimeException e) {
             redisTemplate.delete(activeKey);
             throw e;

@@ -6,6 +6,7 @@ import com.example.server.dto.TaskStatus;
 import com.example.server.entity.MediaFile;
 import com.example.server.service.AgentCheckpointService;
 import com.example.server.service.AnalysisDispatchService;
+import com.example.server.service.AnalysisStatusService;
 import com.example.server.service.AgentEvaluationService;
 import com.example.server.service.AgentTelemetry;
 import com.example.server.service.AiService;
@@ -40,6 +41,7 @@ public class AnalysisController {
     private final AgentTelemetry telemetry;
     private final MediaService mediaService;
     private final TaskEventService taskEventService;
+    private final AnalysisStatusService statusService;
 
     public AnalysisController(AiService aiService,
                               AnalysisDispatchService dispatchService,
@@ -47,7 +49,8 @@ public class AnalysisController {
                               AgentEvaluationService evaluationService,
                               AgentTelemetry telemetry,
                               MediaService mediaService,
-                              TaskEventService taskEventService) {
+                              TaskEventService taskEventService,
+                              AnalysisStatusService statusService) {
         this.aiService = aiService;
         this.dispatchService = dispatchService;
         this.checkpointService = checkpointService;
@@ -55,6 +58,7 @@ public class AnalysisController {
         this.telemetry = telemetry;
         this.mediaService = mediaService;
         this.taskEventService = taskEventService;
+        this.statusService = statusService;
     }
 
     @PostMapping("/ai")
@@ -124,7 +128,7 @@ public class AnalysisController {
             @RequestAttribute(AuthService.REQUEST_USER_ID) Long userId) {
         mediaService.requireOwnedMedia(id, userId);
         String normalizedGoal = normalizeText(goal, "分析目标");
-        return currentStatus(id, normalizedGoal);
+        return statusService.current(id, normalizedGoal);
     }
 
     @GetMapping(value = "/analysis-events", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
@@ -138,28 +142,8 @@ public class AnalysisController {
                 id,
                 TaskEventService.ANALYSIS,
                 normalizedGoal,
-                currentStatus(id, normalizedGoal),
-                checkpointService.loadStage(id, normalizedGoal));
-    }
-
-    private TaskStatus currentStatus(Long id, String normalizedGoal) {
-        AgentState result = checkpointService.loadResult(id, normalizedGoal);
-        if (result != null && result.result() != null) {
-            return TaskStatus.completed(result.result().toMarkdown());
-        }
-
-        String stage = checkpointService.loadStage(id, normalizedGoal);
-        boolean active = dispatchService.isActive(id, normalizedGoal);
-        if (active) {
-            TaskStatus.State state = stage == null
-                    ? TaskStatus.State.QUEUED
-                    : TaskStatus.State.PROCESSING;
-            return TaskStatus.of(state, state == TaskStatus.State.QUEUED ? "任务已排队" : "正在分析");
-        }
-        if ("FAILED".equals(stage)) {
-            return TaskStatus.of(TaskStatus.State.FAILED, "分析失败，请稍后重试");
-        }
-        return TaskStatus.of(TaskStatus.State.NOT_STARTED, "尚未提交分析任务");
+                statusService.current(id, normalizedGoal),
+                statusService.stage(id, normalizedGoal));
     }
 
     @GetMapping("/agent-evaluation")

@@ -2,9 +2,10 @@ package com.example.server.service;
 
 import com.example.server.dto.AgentState;
 import com.example.server.dto.AgentFeedback;
+import com.example.server.dto.TaskStage;
 import com.example.server.dto.VideoChunk;
 import com.example.server.dto.VideoContext;
-import com.example.server.mapper.AgentCheckpointMapper;
+import com.example.server.repository.AgentCheckpointRepository;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.example.server.utils.AnalysisTaskKeys;
@@ -18,118 +19,93 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
 
+/** 对外只暴露 Agent 领域里的计划、上下文、Critic 和结果 Checkpoint。 */
 @Service
 public class AgentCheckpointService {
 
     private static final Logger log = LoggerFactory.getLogger(AgentCheckpointService.class);
     private static final int MAX_FEEDBACK_SAMPLES = 200;
-    private static final Duration CHECKPOINT_TTL = Duration.ofDays(7);
     private static final Duration REVISION_TTL = Duration.ofHours(2);
     private static final Duration FEEDBACK_TTL = Duration.ofDays(30);
 
     private final StringRedisTemplate redisTemplate;
     private final ObjectMapper objectMapper;
-    private final AgentCheckpointMapper checkpointMapper;
+    private final AgentCheckpointRepository checkpointRepository;
 
     public AgentCheckpointService(StringRedisTemplate redisTemplate,
                                   ObjectMapper objectMapper,
-                                  AgentCheckpointMapper checkpointMapper) {
+                                  AgentCheckpointRepository checkpointRepository) {
         this.redisTemplate = redisTemplate;
         this.objectMapper = objectMapper;
-        this.checkpointMapper = checkpointMapper;
+        this.checkpointRepository = checkpointRepository;
     }
 
     public VideoContext loadContext(Long mediaId) {
-        return read(mediaId, mediaCheckpoint("context"), checkpointKey(mediaId),
+        return checkpointRepository.read(mediaId, mediaCheckpoint("context"), checkpointKey(mediaId),
                 "context", VideoContext.class);
     }
 
     public AgentState loadResult(Long mediaId, String goal) {
-        return read(mediaId, goalCheckpoint(goal, "result"), goalKey(mediaId, goal),
+        return checkpointRepository.read(mediaId, goalCheckpoint(goal, "result"), goalKey(mediaId, goal),
                 "result", AgentState.class);
     }
 
     public AgentState.AgentPlan loadPlan(Long mediaId, String goal) {
-        return read(mediaId, goalCheckpoint(goal, "plan"), goalKey(mediaId, goal),
+        return checkpointRepository.read(mediaId, goalCheckpoint(goal, "plan"), goalKey(mediaId, goal),
                 "plan", AgentState.AgentPlan.class);
     }
 
     public AgentState loadCriticState(Long mediaId, String goal) {
-        return read(mediaId, goalCheckpoint(goal, "criticState"), goalKey(mediaId, goal),
+        return checkpointRepository.read(mediaId, goalCheckpoint(goal, "criticState"), goalKey(mediaId, goal),
                 "criticState", AgentState.class);
     }
 
-    public String loadStage(Long mediaId, String goal) {
-        try {
-            Object stage = redisTemplate.opsForHash().get(goalKey(mediaId, goal), "stage");
-            if (stage != null) return stage.toString();
-        } catch (RuntimeException e) {
-            log.warn("agent_checkpoint_stage_cache_read_failed mediaId={}", mediaId, e);
-        }
-        String persisted = checkpointMapper.findStage(mediaId, goalCheckpoint(goal, "stage"));
-        if (persisted != null) cacheStage(goalKey(mediaId, goal), persisted);
-        return persisted;
+    public TaskStage loadStage(Long mediaId, String goal) {
+        return checkpointRepository.readStage(
+                mediaId, goalCheckpoint(goal, "stage"), goalKey(mediaId, goal));
     }
 
     public List<VideoChunk> loadChunks(Long mediaId) {
-        try {
-            Object value = redisTemplate.opsForHash().get(checkpointKey(mediaId), "chunks");
-            if (value != null) {
-                return objectMapper.readValue(value.toString(), new TypeReference<List<VideoChunk>>() { });
-            }
-        } catch (Exception e) {
-            log.warn("video_chunk_checkpoint_cache_read_failed mediaId={}", mediaId, e);
-            try {
-                redisTemplate.opsForHash().delete(checkpointKey(mediaId), "chunks");
-            } catch (RuntimeException cleanupError) {
-                e.addSuppressed(cleanupError);
-            }
-        }
-        try {
-            String persisted = checkpointMapper.findPayload(mediaId, mediaCheckpoint("chunks"));
-            if (persisted == null) return null;
-            List<VideoChunk> chunks = objectMapper.readValue(
-                    persisted, new TypeReference<List<VideoChunk>>() { });
-            cacheField(checkpointKey(mediaId), "chunks", persisted, "CHUNKS_COMPLETED");
-            return chunks;
-        } catch (Exception e) {
-            log.warn("video_chunk_checkpoint_read_failed mediaId={}", mediaId, e);
-            return null;
-        }
+        return checkpointRepository.read(
+                mediaId,
+                mediaCheckpoint("chunks"),
+                checkpointKey(mediaId),
+                "chunks",
+                new TypeReference<List<VideoChunk>>() { });
     }
 
     public void saveContext(Long mediaId, VideoContext context) {
         VideoContext reusableContext = new VideoContext(context.source(), "", context.segments());
-        write(mediaId, mediaCheckpoint("context"), mediaCheckpoint("stage"),
-                checkpointKey(mediaId), "context", "CONTEXT_COMPLETED", reusableContext);
+        checkpointRepository.write(mediaId, mediaCheckpoint("context"), mediaCheckpoint("stage"),
+                checkpointKey(mediaId), "context", TaskStage.CONTEXT_COMPLETED, reusableContext);
     }
 
     public void saveChunks(Long mediaId, List<VideoChunk> chunks) {
-        write(mediaId, mediaCheckpoint("chunks"), mediaCheckpoint("stage"),
-                checkpointKey(mediaId), "chunks", "CHUNKS_COMPLETED", List.copyOf(chunks));
+        checkpointRepository.write(mediaId, mediaCheckpoint("chunks"), mediaCheckpoint("stage"),
+                checkpointKey(mediaId), "chunks", TaskStage.CHUNKS_COMPLETED, List.copyOf(chunks));
     }
 
     public void saveResult(Long mediaId, AgentState state) {
-        String stage = state.critique() != null && state.critique().passed()
-                ? "ANALYSIS_COMPLETED" : "ANALYSIS_COMPLETED_WITH_WARNINGS";
+        TaskStage stage = state.critique() != null && state.critique().passed()
+                ? TaskStage.ANALYSIS_COMPLETED : TaskStage.ANALYSIS_COMPLETED_WITH_WARNINGS;
         String key = goalKey(mediaId, state.goal());
-        write(mediaId, goalCheckpoint(state.goal(), "result"), goalCheckpoint(state.goal(), "stage"),
+        checkpointRepository.write(mediaId, goalCheckpoint(state.goal(), "result"), goalCheckpoint(state.goal(), "stage"),
                 key, "result", stage, state);
         rememberGoalKey(mediaId, key);
     }
 
     public void savePlan(Long mediaId, String goal, AgentState.AgentPlan plan) {
         String key = goalKey(mediaId, goal);
-        write(mediaId, goalCheckpoint(goal, "plan"), goalCheckpoint(goal, "stage"),
-                key, "plan", "PLAN_COMPLETED", plan);
+        checkpointRepository.write(mediaId, goalCheckpoint(goal, "plan"), goalCheckpoint(goal, "stage"),
+                key, "plan", TaskStage.PLAN_COMPLETED, plan);
         rememberGoalKey(mediaId, key);
     }
 
     public void saveCriticState(Long mediaId, AgentState state) {
-        String stage = state.critique() != null && state.critique().passed()
-                ? "CRITIC_PASSED" : "CRITIC_RETRY_REQUIRED";
+        TaskStage stage = state.critique() != null && state.critique().passed()
+                ? TaskStage.CRITIC_PASSED : TaskStage.CRITIC_RETRY_REQUIRED;
         String key = goalKey(mediaId, state.goal());
-        write(mediaId, goalCheckpoint(state.goal(), "criticState"), goalCheckpoint(state.goal(), "stage"),
+        checkpointRepository.write(mediaId, goalCheckpoint(state.goal(), "criticState"), goalCheckpoint(state.goal(), "stage"),
                 key, "criticState", stage, state);
         rememberGoalKey(mediaId, key);
     }
@@ -152,8 +128,8 @@ public class AgentCheckpointService {
         String revisionKey = revisionKey(mediaId, goal);
         if (!Boolean.TRUE.equals(redisTemplate.hasKey(revisionKey))) return false;
 
-        AgentState.AgentPlan plan = readRedis(revisionKey, "plan", AgentState.AgentPlan.class);
-        checkpointMapper.deleteByPrefix(mediaId, goalCheckpoint(goal, ""));
+        AgentState.AgentPlan plan = readRevisionPlan(revisionKey);
+        checkpointRepository.deleteByPrefix(mediaId, goalCheckpoint(goal, ""));
         redisTemplate.delete(goalKey(mediaId, goal));
         if (plan != null) savePlan(mediaId, goal, plan);
         redisTemplate.delete(revisionKey);
@@ -188,18 +164,18 @@ public class AgentCheckpointService {
         }).filter(java.util.Objects::nonNull).toList();
     }
 
-    public void saveFailure(Long mediaId, String goal, String failedStage, Exception error) {
+    public void saveFailure(Long mediaId, String goal, TaskStage failedStage, Exception error) {
         String key = goalKey(mediaId, goal);
-        checkpointMapper.upsert(mediaId, goalCheckpoint(goal, "stage"), "FAILED", null);
-        redisTemplate.opsForHash().put(key, "stage", "FAILED");
-        redisTemplate.opsForHash().put(key, "failedStage", failedStage);
+        checkpointRepository.writeStage(
+                mediaId, goalCheckpoint(goal, "stage"), key, TaskStage.FAILED);
+        redisTemplate.opsForHash().put(key, "failedStage", failedStage.name());
         redisTemplate.opsForHash().put(key, "errorType", error.getClass().getSimpleName());
-        redisTemplate.expire(key, CHECKPOINT_TTL);
+        redisTemplate.expire(key, Duration.ofDays(7));
         rememberGoalKey(mediaId, key);
     }
 
     public void deleteMedia(Long mediaId) {
-        checkpointMapper.deleteByMediaId(mediaId);
+        checkpointRepository.deleteByMediaId(mediaId);
         try {
             Set<String> goalKeys = redisTemplate.opsForSet().members(goalIndexKey(mediaId));
             List<String> keys = new ArrayList<>();
@@ -213,83 +189,21 @@ public class AgentCheckpointService {
         }
     }
 
-    private <T> T read(Long mediaId,
-                       String checkpointName,
-                       String redisKey,
-                       String field,
-                       Class<T> type) {
-        T cached = readRedis(redisKey, field, type);
-        if (cached != null) return cached;
+    private AgentState.AgentPlan readRevisionPlan(String key) {
         try {
-            String payload = checkpointMapper.findPayload(mediaId, checkpointName);
-            if (payload == null) return null;
-            T value = objectMapper.readValue(payload, type);
-            String stage = checkpointMapper.findStage(mediaId, checkpointName);
-            cacheField(redisKey, field, payload, stage);
-            return value;
+            Object value = redisTemplate.opsForHash().get(key, "plan");
+            return value == null ? null : objectMapper.readValue(
+                    value.toString(), AgentState.AgentPlan.class);
         } catch (Exception e) {
-            log.warn("agent_checkpoint_database_read_failed mediaId={} checkpoint={}",
-                    mediaId, checkpointName, e);
+            log.warn("agent_revision_plan_read_failed key={}", key, e);
             return null;
-        }
-    }
-
-    private <T> T readRedis(String key, String field, Class<T> type) {
-        try {
-            Object value = redisTemplate.opsForHash().get(key, field);
-            return value == null ? null : objectMapper.readValue(value.toString(), type);
-        } catch (Exception e) {
-            log.warn("agent_checkpoint_read_failed key={} field={}", key, field, e);
-            try {
-                redisTemplate.opsForHash().delete(key, field);
-            } catch (RuntimeException cleanupError) {
-                e.addSuppressed(cleanupError);
-            }
-            return null;
-        }
-    }
-
-    private void write(Long mediaId,
-                       String checkpointName,
-                       String stageCheckpointName,
-                       String redisKey,
-                       String field,
-                       String stage,
-                       Object value) {
-        try {
-            String payload = objectMapper.writeValueAsString(value);
-            // MySQL 是恢复真源，Redis 丢了只会变慢，不会让用户的 Agent 进度消失。
-            checkpointMapper.upsert(mediaId, checkpointName, stage, payload);
-            checkpointMapper.upsert(mediaId, stageCheckpointName, stage, null);
-            cacheField(redisKey, field, payload, stage);
-        } catch (Exception e) {
-            throw new IllegalStateException("保存 Agent Checkpoint 失败", e);
-        }
-    }
-
-    private void cacheField(String key, String field, String payload, String stage) {
-        try {
-            redisTemplate.opsForHash().put(key, field, payload);
-            if (stage != null) redisTemplate.opsForHash().put(key, "stage", stage);
-            redisTemplate.expire(key, CHECKPOINT_TTL);
-        } catch (RuntimeException e) {
-            log.warn("agent_checkpoint_cache_write_failed key={} field={}", key, field, e);
-        }
-    }
-
-    private void cacheStage(String key, String stage) {
-        try {
-            redisTemplate.opsForHash().put(key, "stage", stage);
-            redisTemplate.expire(key, CHECKPOINT_TTL);
-        } catch (RuntimeException e) {
-            log.warn("agent_checkpoint_stage_cache_write_failed key={}", key, e);
         }
     }
 
     private void rememberGoalKey(Long mediaId, String key) {
         try {
             redisTemplate.opsForSet().add(goalIndexKey(mediaId), key);
-            redisTemplate.expire(goalIndexKey(mediaId), CHECKPOINT_TTL);
+            redisTemplate.expire(goalIndexKey(mediaId), Duration.ofDays(7));
         } catch (RuntimeException e) {
             log.warn("agent_checkpoint_index_write_failed mediaId={} key={}", mediaId, key, e);
         }

@@ -3,6 +3,7 @@ package com.example.server.service;
 import com.example.server.dto.AgentFeedback;
 import com.example.server.dto.AgentState;
 import com.example.server.dto.TaskStatus;
+import com.example.server.dto.TaskStage;
 import com.example.server.dto.VideoChunk;
 import com.example.server.dto.VideoContext;
 import com.example.server.entity.MediaFile;
@@ -13,6 +14,7 @@ import org.springframework.stereotype.Service;
 
 import java.util.List;
 
+/** 视频分析的应用层入口，负责串起上下文构建、AgentLoop 和结果落库。 */
 @Service
 public class AiService {
 
@@ -45,6 +47,7 @@ public class AiService {
     public void asyncAnalyze(Long mediaId, String userGoal) {
         String traceId = telemetry.start(mediaId);
         telemetry.bind(traceId);
+        TaskStage currentStage = TaskStage.VIDEO_CONTEXT;
         MediaFile mediaFile = mediaFileMapper.selectById(mediaId);
         if (mediaFile == null) {
             telemetry.flush(traceId);
@@ -60,35 +63,18 @@ public class AiService {
                 return;
             }
 
-            VideoContext videoContext = checkpointService.loadContext(mediaId);
-            if (videoContext == null) {
-                taskEventService.publishAnalysis(mediaId, userGoal,
-                        TaskStatus.of(TaskStatus.State.PROCESSING, "正在并行提取语音与关键帧"),
-                        "VIDEO_CONTEXT");
-                long contextStarted = System.nanoTime();
-                try {
-                    videoContext = videoContextService.build(mediaFile.getFilePath(), userGoal, traceId);
-                    checkpointService.saveContext(mediaId, videoContext);
-                    telemetry.stage(traceId, "VIDEO_CONTEXT", contextStarted, true);
-                } catch (RuntimeException e) {
-                    telemetry.stage(traceId, "VIDEO_CONTEXT", contextStarted, false);
-                    throw e;
-                }
-            } else {
-                videoContext = new VideoContext(videoContext.source(), userGoal, videoContext.segments());
-                telemetry.increment(traceId, "contextCheckpointHits", 1);
-            }
-
+            VideoContext videoContext = resolveContext(mediaFile, userGoal, traceId);
             mediaFile.setTranscriptText(videoContext.transcriptText());
+            currentStage = TaskStage.AGENT_LOOP;
             taskEventService.publishAnalysis(mediaId, userGoal,
                     TaskStatus.of(TaskStatus.State.PROCESSING, "多模态上下文已就绪，Agent 开始分析"),
-                    "AGENT_LOOP");
+                    TaskStage.AGENT_LOOP);
             long agentStarted = System.nanoTime();
             try {
                 agentState = agentLoopService.run(mediaId, videoContext);
-                telemetry.stage(traceId, "AGENT_LOOP", agentStarted, true);
+                telemetry.stage(traceId, TaskStage.AGENT_LOOP.name(), agentStarted, true);
             } catch (RuntimeException e) {
-                telemetry.stage(traceId, "AGENT_LOOP", agentStarted, false);
+                telemetry.stage(traceId, TaskStage.AGENT_LOOP.name(), agentStarted, false);
                 throw e;
             }
             persistResult(mediaFile, agentState);
@@ -96,7 +82,7 @@ public class AiService {
                     traceId, mediaId, agentState.round());
         } catch (Exception e) {
             try {
-                checkpointService.saveFailure(mediaId, userGoal, "AI_ANALYSIS", e);
+                checkpointService.saveFailure(mediaId, userGoal, currentStage, e);
             } catch (RuntimeException checkpointError) {
                 e.addSuppressed(checkpointError);
                 log.error("agent_failure_checkpoint_write_failed traceId={} mediaId={}",
@@ -107,6 +93,28 @@ public class AiService {
         } finally {
             telemetry.flush(traceId);
             telemetry.clear();
+        }
+    }
+
+    private VideoContext resolveContext(MediaFile mediaFile, String userGoal, String traceId) {
+        VideoContext checkpoint = checkpointService.loadContext(mediaFile.getId());
+        if (checkpoint != null) {
+            telemetry.increment(traceId, "contextCheckpointHits", 1);
+            return new VideoContext(checkpoint.source(), userGoal, checkpoint.segments());
+        }
+
+        taskEventService.publishAnalysis(mediaFile.getId(), userGoal,
+                TaskStatus.of(TaskStatus.State.PROCESSING, "正在并行提取语音与关键帧"),
+                TaskStage.VIDEO_CONTEXT);
+        long started = System.nanoTime();
+        try {
+            VideoContext context = videoContextService.build(mediaFile.getFilePath(), userGoal, traceId);
+            checkpointService.saveContext(mediaFile.getId(), context);
+            telemetry.stage(traceId, TaskStage.VIDEO_CONTEXT.name(), started, true);
+            return context;
+        } catch (RuntimeException e) {
+            telemetry.stage(traceId, TaskStage.VIDEO_CONTEXT.name(), started, false);
+            throw e;
         }
     }
 

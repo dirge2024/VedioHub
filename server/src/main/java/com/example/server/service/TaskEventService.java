@@ -2,6 +2,7 @@ package com.example.server.service;
 
 import com.example.server.dto.TaskEvent;
 import com.example.server.dto.TaskStatus;
+import com.example.server.dto.TaskStage;
 import com.example.server.utils.AnalysisTaskKeys;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -13,6 +14,7 @@ import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 
+/** 后端阶段变化发布到这里，SSE 订阅者只关心事件，不反向依赖业务服务。 */
 @Service
 public class TaskEventService {
 
@@ -29,7 +31,7 @@ public class TaskEventService {
                                 String type,
                                 String goal,
                                 TaskStatus initialStatus,
-                                String stage) {
+                                TaskStage stage) {
         String key = key(mediaId, type, goal);
         SseEmitter emitter = new SseEmitter(STREAM_TIMEOUT_MS);
         subscribers.computeIfAbsent(key, ignored -> new CopyOnWriteArrayList<>()).add(emitter);
@@ -40,11 +42,11 @@ public class TaskEventService {
         return emitter;
     }
 
-    public void publishAnalysis(Long mediaId, String goal, TaskStatus status, String stage) {
+    public void publishAnalysis(Long mediaId, String goal, TaskStatus status, TaskStage stage) {
         publish(key(mediaId, ANALYSIS, goal), TaskEvent.of(status, stage));
     }
 
-    public void publishTranscription(Long mediaId, TaskStatus status, String stage) {
+    public void publishTranscription(Long mediaId, TaskStatus status, TaskStage stage) {
         publish(key(mediaId, TRANSCRIPTION, ""), TaskEvent.of(status, stage));
     }
 

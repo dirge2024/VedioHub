@@ -3,6 +3,7 @@ package com.example.server.consumer;
 import com.example.server.dto.AnalysisTaskMsg;
 import com.example.server.dto.AgentState;
 import com.example.server.dto.TaskStatus;
+import com.example.server.dto.TaskStage;
 import com.example.server.service.AiService;
 import com.example.server.service.AgentCheckpointService;
 import com.example.server.service.FailedAnalysisTaskService;
@@ -87,7 +88,7 @@ public class VideoAnalysisConsumer implements RocketMQListener<AnalysisTaskMsg> 
             redisTemplate.expire(attemptsKey, ACTIVE_TTL);
             taskEventService.publishAnalysis(mediaId, msg.getUserGoal(),
                     TaskStatus.of(TaskStatus.State.PROCESSING, "视频分析任务开始执行"),
-                    "CONSUMING");
+                    TaskStage.CONSUMING);
             if (msg.isRevision()) {
                 checkpointService.beginStagedRevision(mediaId, msg.getUserGoal());
                 redisTemplate.delete(completedKey);
@@ -100,7 +101,7 @@ public class VideoAnalysisConsumer implements RocketMQListener<AnalysisTaskMsg> 
                     if (reusable != null && reusable.result() != null
                             && aiService.reuseResult(mediaId, sourceMediaId, reusable)) {
                         taskEventService.publishAnalysis(mediaId, msg.getUserGoal(),
-                                TaskStatus.completed(reusable.result().toMarkdown()), "COMPLETED_REUSED");
+                                TaskStatus.completed(reusable.result().toMarkdown()), TaskStage.COMPLETED_REUSED);
                         log.info("video_analysis_reused mediaId={} sourceMediaId={}", mediaId, sourceMediaId);
                         return;
                     }
@@ -113,7 +114,7 @@ public class VideoAnalysisConsumer implements RocketMQListener<AnalysisTaskMsg> 
             AgentState completed = checkpointService.loadResult(mediaId, msg.getUserGoal());
             if (completed != null && completed.result() != null) {
                 taskEventService.publishAnalysis(mediaId, msg.getUserGoal(),
-                        TaskStatus.completed(completed.result().toMarkdown()), "COMPLETED");
+                        TaskStatus.completed(completed.result().toMarkdown()), TaskStage.COMPLETED);
             }
         } catch (Exception e) {
             if (acquired && attempt > 0 && attempt < MAX_DELIVERY_ATTEMPTS) {
@@ -122,7 +123,7 @@ public class VideoAnalysisConsumer implements RocketMQListener<AnalysisTaskMsg> 
                 redisTemplate.expire(activeKey, ACTIVE_TTL);
                 taskEventService.publishAnalysis(mediaId, msg.getUserGoal(),
                         TaskStatus.of(TaskStatus.State.PROCESSING, "本次执行失败，等待消息队列重试"),
-                        "RETRYING");
+                        TaskStage.RETRYING);
                 log.warn("video_analysis_retry_scheduled mediaId={} attempt={}", mediaId, attempt, e);
                 throw new IllegalStateException("视频分析消费失败，交由 RocketMQ 重试", e);
             }
@@ -138,7 +139,7 @@ public class VideoAnalysisConsumer implements RocketMQListener<AnalysisTaskMsg> 
                     rocketMQTemplate.convertAndSend(deadLetterTopic, msg);
                     taskEventService.publishAnalysis(mediaId, msg.getUserGoal(),
                             TaskStatus.of(TaskStatus.State.FAILED, "分析失败，已进入人工处理队列"),
-                            "DEAD_LETTERED");
+                            TaskStage.DEAD_LETTERED);
                     log.error("video_analysis_dead_lettered mediaId={} attempts={}", mediaId, attempt, e);
                     return;
                 } catch (RuntimeException deadLetterError) {

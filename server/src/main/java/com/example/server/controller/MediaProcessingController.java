@@ -1,6 +1,7 @@
 package com.example.server.controller;
 
 import com.example.server.dto.TaskStatus;
+import com.example.server.dto.TaskStage;
 import com.example.server.entity.MediaFile;
 import com.example.server.service.AudioExportService;
 import com.example.server.service.AuthService;
@@ -84,7 +85,7 @@ public class MediaProcessingController {
                 TaskEventService.TRANSCRIPTION,
                 "",
                 transcriptionTaskService.status(mediaFile),
-                "TRANSCRIPTION");
+                TaskStage.TRANSCRIPTION);
     }
 
     @GetMapping("/download")

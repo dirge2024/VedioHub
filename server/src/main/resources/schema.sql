@@ -1,3 +1,29 @@
+CREATE TABLE IF NOT EXISTS users (
+    id BIGINT NOT NULL AUTO_INCREMENT,
+    username VARCHAR(32) NOT NULL,
+    password VARCHAR(255) NOT NULL,
+    nickname VARCHAR(50) NOT NULL,
+    avatar VARCHAR(512) NULL,
+    role VARCHAR(32) NOT NULL DEFAULT 'USER',
+    PRIMARY KEY (id),
+    UNIQUE KEY uk_users_username (username)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS media_files (
+    id BIGINT NOT NULL AUTO_INCREMENT,
+    user_id BIGINT NOT NULL,
+    filename VARCHAR(255) NOT NULL,
+    status VARCHAR(32) NOT NULL,
+    file_path VARCHAR(1024) NOT NULL,
+    ai_summary LONGTEXT NULL,
+    transcript_text LONGTEXT NULL,
+    cover_url VARCHAR(1024) NULL,
+    upload_time TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+    PRIMARY KEY (id),
+    KEY idx_media_user_time (user_id, upload_time),
+    KEY idx_media_status_time (status, upload_time)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 CREATE TABLE IF NOT EXISTS agent_checkpoints (
     media_id BIGINT NOT NULL,
     checkpoint_key VARCHAR(160) NOT NULL,

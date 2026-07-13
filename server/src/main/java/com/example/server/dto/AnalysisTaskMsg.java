@@ -2,10 +2,13 @@ package com.example.server.dto;
 
 import java.io.Serializable;
 
-//必须实现Serializable接口，否则不能在网络上传输
 public class AnalysisTaskMsg implements Serializable {
+
+    public static final String START_ANALYSIS = "START_ANALYSIS";
+    public static final String REVISE_ANALYSIS = "REVISE_ANALYSIS";
+
     private Long mediaId;
-    private String action; //例如"START_ANALYSIS"
+    private String action;
     private String contentHash;
     private String userGoal;
 
@@ -26,4 +29,12 @@ public class AnalysisTaskMsg implements Serializable {
     public void setContentHash(String contentHash) { this.contentHash = contentHash; }
     public String getUserGoal() { return userGoal; }
     public void setUserGoal(String userGoal) { this.userGoal = userGoal; }
+
+    public boolean isRevision() {
+        return REVISE_ANALYSIS.equals(action);
+    }
+
+    public boolean hasSupportedAction() {
+        return START_ANALYSIS.equals(action) || REVISE_ANALYSIS.equals(action);
+    }
 }

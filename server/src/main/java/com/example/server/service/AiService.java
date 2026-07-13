@@ -2,18 +2,14 @@ package com.example.server.service;
 
 import com.example.server.dto.AgentFeedback;
 import com.example.server.dto.AgentState;
-import com.example.server.dto.TaskStatus;
 import com.example.server.dto.VideoChunk;
 import com.example.server.dto.VideoContext;
 import com.example.server.entity.MediaFile;
 import com.example.server.mapper.MediaFileMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.scheduling.annotation.Async;
-import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 
-import java.time.Duration;
 import java.util.List;
 
 @Service
@@ -22,30 +18,24 @@ public class AiService {
     private static final Logger log = LoggerFactory.getLogger(AiService.class);
 
     private final MediaFileMapper mediaFileMapper;
-    private final VideoTranscriptionService videoTranscriptionService;
     private final VideoContextService videoContextService;
     private final AgentLoopService agentLoopService;
     private final AgentCheckpointService checkpointService;
     private final AgentTelemetry telemetry;
     private final MediaService mediaService;
-    private final StringRedisTemplate redisTemplate;
 
     public AiService(MediaFileMapper mediaFileMapper,
-                     VideoTranscriptionService videoTranscriptionService,
                      VideoContextService videoContextService,
                      AgentLoopService agentLoopService,
                      AgentCheckpointService checkpointService,
                      AgentTelemetry telemetry,
-                     MediaService mediaService,
-                     StringRedisTemplate redisTemplate) {
+                     MediaService mediaService) {
         this.mediaFileMapper = mediaFileMapper;
-        this.videoTranscriptionService = videoTranscriptionService;
         this.videoContextService = videoContextService;
         this.agentLoopService = agentLoopService;
         this.checkpointService = checkpointService;
         this.telemetry = telemetry;
         this.mediaService = mediaService;
-        this.redisTemplate = redisTemplate;
     }
 
     public void asyncAnalyze(Long mediaId, String userGoal) {
@@ -95,7 +85,13 @@ public class AiService {
             log.info("agent_analysis_completed traceId={} mediaId={} rounds={}",
                     traceId, mediaId, agentState.round());
         } catch (Exception e) {
-            checkpointService.saveFailure(mediaId, userGoal, "AI_ANALYSIS", e);
+            try {
+                checkpointService.saveFailure(mediaId, userGoal, "AI_ANALYSIS", e);
+            } catch (RuntimeException checkpointError) {
+                e.addSuppressed(checkpointError);
+                log.error("agent_failure_checkpoint_write_failed traceId={} mediaId={}",
+                        traceId, mediaId, checkpointError);
+            }
             log.error("agent_analysis_failed traceId={} mediaId={}", traceId, mediaId, e);
             throw new IllegalStateException("AI analysis failed", e);
         } finally {
@@ -119,7 +115,7 @@ public class AiService {
         }
     }
 
-    public String prepareRevision(AgentFeedback feedback) {
+    public void stageRevision(AgentFeedback feedback) {
         AgentFeedback normalized = feedback.normalized();
         checkpointService.saveFeedback(normalized);
 
@@ -129,8 +125,18 @@ public class AiService {
         AgentState.AgentPlan correctedPlan = normalized.correctedTasks().isEmpty()
                 ? null
                 : new AgentState.AgentPlan(goal, normalized.correctedTasks());
-        checkpointService.resetForRerun(normalized.mediaId(), goal, correctedPlan);
-        return goal;
+        checkpointService.stageRevision(normalized.mediaId(), goal, correctedPlan);
+    }
+
+    public String revisionGoal(AgentFeedback feedback) {
+        AgentFeedback normalized = feedback.normalized();
+        return normalized.correctedGoal() == null || normalized.correctedGoal().isBlank()
+                ? normalized.goal()
+                : normalized.correctedGoal();
+    }
+
+    public void cancelStagedRevision(Long mediaId, String goal) {
+        checkpointService.cancelStagedRevision(mediaId, goal);
     }
 
     public boolean reuseResult(Long mediaId, Long sourceMediaId, AgentState state) {
@@ -147,92 +153,6 @@ public class AiService {
                 state.goal(), state.plan(), state.result(), state.critique(), state.round()));
         persistResult(mediaFile, state);
         return true;
-    }
-
-    @Async("aiTaskExecutor")
-    public void asyncTranscribe(Long mediaId) {
-        MediaFile mediaFile = mediaFileMapper.selectById(mediaId);
-        if (mediaFile == null) {
-            clearTranscriptionActive(mediaId);
-            return;
-        }
-
-        try {
-            setTranscriptionState(mediaId, TaskStatus.State.PROCESSING, Duration.ofHours(2));
-            mediaFile.setTranscriptText(videoTranscriptionService.transcribe(
-                    mediaService.readableSource(mediaFile.getFilePath())));
-            mediaFileMapper.updateById(mediaFile);
-            mediaService.invalidateUserList(mediaFile.getUserId());
-            setTranscriptionState(mediaId, TaskStatus.State.COMPLETED, Duration.ofDays(7));
-            log.info("transcription_completed mediaId={}", mediaId);
-        } catch (Exception e) {
-            setTranscriptionState(mediaId, TaskStatus.State.FAILED, Duration.ofHours(1));
-            log.error("transcription_failed mediaId={}", mediaId, e);
-        } finally {
-            clearTranscriptionActive(mediaId);
-        }
-    }
-
-    public boolean queueTranscription(Long mediaId) {
-        Boolean accepted = redisTemplate.opsForValue().setIfAbsent(
-                transcriptionActiveKey(mediaId), "1", Duration.ofHours(2));
-        if (Boolean.TRUE.equals(accepted)) {
-            setTranscriptionState(mediaId, TaskStatus.State.QUEUED, Duration.ofHours(2));
-            return true;
-        }
-        return false;
-    }
-
-    public TaskStatus transcriptionStatus(MediaFile mediaFile) {
-        if (mediaFile.getTranscriptText() != null && !mediaFile.getTranscriptText().isBlank()) {
-            return TaskStatus.completed(mediaFile.getTranscriptText());
-        }
-        String stateValue = redisTemplate.opsForValue().get(transcriptionStateKey(mediaFile.getId()));
-        if (stateValue == null) {
-            boolean active = Boolean.TRUE.equals(redisTemplate.hasKey(
-                    transcriptionActiveKey(mediaFile.getId())));
-            return active
-                    ? TaskStatus.of(TaskStatus.State.PROCESSING, "正在提取文字")
-                    : TaskStatus.of(TaskStatus.State.NOT_STARTED, "尚未提交文字提取任务");
-        }
-        TaskStatus.State state;
-        try {
-            state = TaskStatus.State.valueOf(stateValue);
-        } catch (IllegalArgumentException e) {
-            log.warn("invalid_transcription_state mediaId={} state={}", mediaFile.getId(), stateValue);
-            return TaskStatus.of(TaskStatus.State.NOT_STARTED, "任务状态不可用");
-        }
-        return switch (state) {
-            case COMPLETED -> TaskStatus.completed(mediaFile.getTranscriptText());
-            case FAILED -> TaskStatus.of(state, "文字提取失败，请稍后重试");
-            case QUEUED -> TaskStatus.of(state, "文字提取任务已排队");
-            case PROCESSING -> TaskStatus.of(state, "正在提取文字");
-            case NOT_STARTED -> TaskStatus.of(state, "尚未提交文字提取任务");
-        };
-    }
-
-    private void setTranscriptionState(Long mediaId, TaskStatus.State state, Duration ttl) {
-        try {
-            redisTemplate.opsForValue().set(transcriptionStateKey(mediaId), state.name(), ttl);
-        } catch (RuntimeException e) {
-            log.warn("transcription_state_write_failed mediaId={} state={}", mediaId, state, e);
-        }
-    }
-
-    private void clearTranscriptionActive(Long mediaId) {
-        try {
-            redisTemplate.delete(transcriptionActiveKey(mediaId));
-        } catch (RuntimeException e) {
-            log.warn("transcription_active_cleanup_failed mediaId={}", mediaId, e);
-        }
-    }
-
-    private String transcriptionActiveKey(Long mediaId) {
-        return "transcription:active:" + mediaId;
-    }
-
-    private String transcriptionStateKey(Long mediaId) {
-        return "transcription:state:" + mediaId;
     }
 
     private void persistResult(MediaFile mediaFile, AgentState agentState) {

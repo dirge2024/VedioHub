@@ -102,7 +102,7 @@
           </div>
         </div>
         <transition name="toast-pop">
-          <div v-if="message" class="notification-bar" :class="{ 'error': message.startsWith('❌') || message.startsWith('⚠️') }">
+          <div v-if="message" class="notification-bar" :class="{ 'error': messageIsError }">
             {{ message }}
           </div>
         </transition>
@@ -297,9 +297,10 @@
 
 <script setup>
 import { ref, onMounted, onUnmounted, computed } from 'vue'
-import { marked } from 'marked'
 import { apiRequest, clearAuthToken, hasAuthToken, setAuthToken } from './api'
+import { uploadVideoInChunks } from './chunkUpload'
 import { DEMO_EVALUATION, DEMO_ITEM, DEMO_PLAN, DEMO_RESULT, DEMO_TRACE } from './demoData'
+import { renderMarkdown } from './markdown'
 
 // --- 变量定义 ---
 const DEMO_MODE = new URLSearchParams(window.location.search).has('demo')
@@ -308,6 +309,7 @@ const goalPresets = ['生成学习笔记', '提炼会议结论', '梳理操作�
 const file = ref(null)
 const videoUrl = ref('')
 const message = ref('')
+const messageIsError = ref(false)
 const uploading = ref(false)
 const list = ref([])
 const isDragOver = ref(false)
@@ -339,52 +341,27 @@ const authError = ref(false)
 const authForm = ref({ username: '', password: '', nickname: '' })
 const pollingTimers = ref({})
 const traceStages = computed(() => Object.entries(sidebar.value.trace?.stageDurationMs || {}))
-const MARKDOWN_TAGS = new Set([
-  'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'P', 'BR', 'HR', 'BLOCKQUOTE',
-  'UL', 'OL', 'LI', 'STRONG', 'EM', 'DEL', 'CODE', 'PRE', 'A',
-  'TABLE', 'THEAD', 'TBODY', 'TR', 'TH', 'TD'
-])
 
-const stopPolling = (id) => {
-  const polling = pollingTimers.value[id]
+const pollingKey = (id, type) => `${type}:${id}`
+
+const stopPolling = (id, type) => {
+  const key = pollingKey(id, type)
+  const polling = pollingTimers.value[key]
   if (!polling) return
   clearInterval(polling.timer)
   clearTimeout(polling.timeout)
-  delete pollingTimers.value[id]
+  delete pollingTimers.value[key]
 }
 
 const stopAllPolling = () => {
-  Object.keys(pollingTimers.value).forEach(stopPolling)
+  Object.values(pollingTimers.value).forEach(polling => {
+    clearInterval(polling.timer)
+    clearTimeout(polling.timeout)
+  })
+  pollingTimers.value = {}
 }
 
-const renderedMarkdown = computed(() => {
-  if (!sidebar.value.content) return ''
-  let cleanText = sidebar.value.content.replace(/<think>[\s\S]*?<\/think>/gi, '')
-  if (cleanText.includes('</think>')) cleanText = cleanText.split('</think>').pop()
-  if (!cleanText.trim()) cleanText = sidebar.value.content
-  const template = document.createElement('template')
-  template.innerHTML = marked.parse(cleanText)
-  template.content.querySelectorAll('*').forEach(node => {
-    if (!MARKDOWN_TAGS.has(node.tagName)) {
-      node.replaceWith(document.createTextNode(node.textContent || ''))
-      return
-    }
-    for (const attribute of [...node.attributes]) {
-      const isAllowedLinkAttribute = node.tagName === 'A'
-        && (attribute.name === 'href' || attribute.name === 'title')
-      if (!isAllowedLinkAttribute) {
-        node.removeAttribute(attribute.name)
-      }
-    }
-    if (node.tagName === 'A') {
-      const href = node.getAttribute('href') || ''
-      if (!/^(https?:|mailto:|\/|#)/i.test(href)) node.removeAttribute('href')
-      node.setAttribute('rel', 'noopener noreferrer')
-      node.setAttribute('target', '_blank')
-    }
-  })
-  return template.innerHTML
-})
+const renderedMarkdown = computed(() => renderMarkdown(sidebar.value.content))
 
 // --- 核心业务逻辑 ---
 
@@ -426,9 +403,6 @@ const handleDrop = async (e) => {
   await uploadFile()
 }
 
-const CHUNK_SIZE = 5 * 1024 * 1024
-const UPLOAD_CONCURRENCY = 3
-
 const uploadFile = async () => {
   if (!file.value) return
   if (DEMO_MODE) {
@@ -436,69 +410,14 @@ const uploadFile = async () => {
     return
   }
   uploading.value = true
-  const selectedFile = file.value
-  const totalChunks = Math.ceil(selectedFile.size / CHUNK_SIZE)
-  const storageKey = `upload:${selectedFile.name}:${selectedFile.size}:${selectedFile.lastModified}`
 
   try {
-    let uploadId = localStorage.getItem(storageKey)
-    let uploadedChunks = new Set()
-
-    if (uploadId) {
-      const statusRes = await apiRequest(`/media/upload-status?uploadId=${encodeURIComponent(uploadId)}`)
-      if (statusRes.ok) {
-        uploadedChunks = new Set(await statusRes.json())
-      } else {
-        localStorage.removeItem(storageKey)
-        uploadId = null
-      }
-    }
-
-    if (!uploadId) {
-      const params = new URLSearchParams({
-        filename: selectedFile.name,
-        totalChunks: String(totalChunks)
-      })
-      const initRes = await apiRequest(`/media/init-upload?${params}`, { method: 'POST' })
-      const initText = await initRes.text()
-      if (!initRes.ok) throw new Error(initText || 'Failed to initialize upload')
-      uploadId = initText
-      localStorage.setItem(storageKey, uploadId)
-    }
-
-    const pendingChunks = Array.from({ length: totalChunks }, (_, index) => index)
-      .filter(index => !uploadedChunks.has(index))
-    let cursor = 0
-    let completedChunks = uploadedChunks.size
-
-    const uploadNext = async () => {
-      while (cursor < pendingChunks.length) {
-        const index = pendingChunks[cursor++]
-        const formData = new FormData()
-        formData.append('uploadId', uploadId)
-        formData.append('chunkIndex', String(index))
-        formData.append('totalChunks', String(totalChunks))
-        formData.append('file', selectedFile.slice(index * CHUNK_SIZE, Math.min(selectedFile.size, (index + 1) * CHUNK_SIZE)))
-
-        const chunkRes = await apiRequest('/media/upload-chunk', {
-          method: 'POST',
-          body: formData
-        })
-        if (!chunkRes.ok) throw new Error(await chunkRes.text() || `Chunk ${index} failed`)
-        completedChunks++
-        message.value = `正在上传分片 ${completedChunks}/${totalChunks}...`
-      }
-    }
-    await Promise.all(Array.from(
-      { length: Math.min(UPLOAD_CONCURRENCY, pendingChunks.length) }, uploadNext
-    ))
-
-    message.value = '分片上传完成，正在合并文件...'
-    const completeParams = new URLSearchParams({ uploadId })
-    const completeRes = await apiRequest(`/media/complete-upload?${completeParams}`, { method: 'POST' })
-    if (!completeRes.ok) throw new Error(await completeRes.text() || 'Upload merge failed')
-
-    localStorage.removeItem(storageKey)
+    await uploadVideoInChunks(file.value, progress => {
+      messageIsError.value = false
+      message.value = progress.phase === 'merging'
+        ? '分片上传完成，正在合并文件...'
+        : `正在上传分片 ${progress.completedChunks}/${progress.totalChunks}...`
+    })
     showMsg('✅ 本地上传完成')
     fetchList()
   } catch (error) {
@@ -509,7 +428,6 @@ const uploadFile = async () => {
   }
 }
 
-// 【链接上传 - 修复版】
 const handleUrlUpload = async () => {
   if (!videoUrl.value) return
   if (DEMO_MODE) {
@@ -536,6 +454,7 @@ const handleUrlUpload = async () => {
   }
 
   uploading.value = true
+  messageIsError.value = false
   message.value = '正在解析链接并极速下载 (低码率模式)...'
 
   const formData = new FormData()
@@ -546,7 +465,6 @@ const handleUrlUpload = async () => {
       method: 'POST',
       body: formData
     })
-    // 【关键修复】现在后端会返回 500 状态码，这里能正确捕获错误了
     const text = await res.text()
     if (!res.ok) throw new Error(text)
 
@@ -555,7 +473,6 @@ const handleUrlUpload = async () => {
     fetchList()
   } catch (error) {
     console.error(error)
-    // 提取后端传来的具体错误信息
     let errMsg = error.message
     if (errMsg.includes("Unsupported URL")) errMsg = "不支持该平台链接"
     showMsg('❌ 解析失败: ' + errMsg, true)
@@ -566,7 +483,13 @@ const handleUrlUpload = async () => {
 
 const showMsg = (msg, isError = false) => {
   message.value = msg
-  setTimeout(() => { if(message.value === msg) message.value = '' }, 4000)
+  messageIsError.value = isError
+  setTimeout(() => {
+    if (message.value === msg) {
+      message.value = ''
+      messageIsError.value = false
+    }
+  }, 4000)
 }
 
 const fetchList = async () => {
@@ -650,7 +573,7 @@ const transcribe = async (id) => {
     sidebar.value.loading = false
     return
   }
-  if (pollingTimers.value[id] && pollingTimers.value[id].type === 'text') {
+  if (pollingTimers.value[pollingKey(id, 'text')]) {
     openSidebar('text', '全量文字提取')
     sidebar.value.mediaId = id
     sidebar.value.loading = true
@@ -684,7 +607,7 @@ const transcribe = async (id) => {
 }
 
 const aiAnalyze = async (id, goal) => {
-  if (pollingTimers.value[id] && pollingTimers.value[id].type === 'ai') {
+  if (pollingTimers.value[pollingKey(id, 'ai')]) {
     sidebar.value.mode = 'result'
     sidebar.value.loading = true
     return
@@ -715,7 +638,8 @@ const aiAnalyze = async (id, goal) => {
 }
 
 const startPolling = (id, type, goal = '') => {
-  stopPolling(id)
+  stopPolling(id, type)
+  const key = pollingKey(id, type)
   const polling = { timer: null, timeout: null, type, inFlight: false, metaTick: 0 }
 
   const finish = async (result, failed = false) => {
@@ -725,11 +649,11 @@ const startPolling = (id, type, goal = '') => {
       if (type === 'ai' && !failed) await refreshAgentMeta(id, goal, true)
     }
     showMsg(failed ? '任务执行失败，请稍后重试' : '任务完成', failed)
-    stopPolling(id)
+    stopPolling(id, type)
   }
 
   const poll = async () => {
-    if (polling.inFlight || pollingTimers.value[id] !== polling) return
+    if (polling.inFlight || pollingTimers.value[key] !== polling) return
     polling.inFlight = true
     try {
       if (type === 'ai') {
@@ -770,13 +694,13 @@ const startPolling = (id, type, goal = '') => {
 
   polling.timer = setInterval(poll, 3000)
   polling.timeout = setTimeout(() => {
-    if (pollingTimers.value[id] === polling) {
-      stopPolling(id)
+    if (pollingTimers.value[key] === polling) {
+      stopPolling(id, type)
       showMsg('任务仍在后台执行，可稍后重新打开查看', true)
       if (sidebar.value.mediaId === id) sidebar.value.loading = false
     }
   }, 300000)
-  pollingTimers.value[id] = polling
+  pollingTimers.value[key] = polling
   poll()
 }
 

@@ -85,7 +85,7 @@ public class LongVideoContextService {
         if (requiredTimestamps != null) {
             fullContext.segments().stream()
                     .filter(segment -> requiredTimestamps.stream().anyMatch(timestamp ->
-                            timestamp >= segment.startMs() && timestamp < segment.endMs()))
+                            nearSegment(timestamp, segment)))
                     .forEach(segment -> segments.put(segmentKey(segment), segment));
         }
 
@@ -113,6 +113,12 @@ public class LongVideoContextService {
         return segment.startMs() + ":" + segment.endMs();
     }
 
+    private boolean nearSegment(long timestamp, VideoContext.VideoSegment segment) {
+        long margin = Math.max(60_000L, segment.endMs() - segment.startMs());
+        return timestamp >= Math.max(0, segment.startMs() - margin)
+                && timestamp < segment.endMs() + margin;
+    }
+
     private List<VideoChunk> buildChunks(List<VideoContext.VideoSegment> segments) {
         List<VideoChunk> chunks = new ArrayList<>();
         for (long start = 0; start <= segments.get(segments.size() - 1).startMs(); start += CHUNK_MS) {
@@ -138,7 +144,6 @@ public class LongVideoContextService {
     }
 
     private double hybridScore(String goal, List<Double> queryEmbedding, VideoChunk chunk) {
-        // ponytail: 轻量关键词命中，数据量扩大后再升级分词器或 Reranker。
         String normalizedGoal = normalize(goal);
         long matched = chunk.keywords().stream()
                 .filter(keyword -> !keyword.isBlank() && normalizedGoal.contains(normalize(keyword)))

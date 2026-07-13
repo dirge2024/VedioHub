@@ -34,7 +34,7 @@ public class ThreadPoolConfig {
         executor.setMaxPoolSize(maxSize);
         executor.setQueueCapacity(queueCapacity);
         executor.setThreadNamePrefix(prefix);
-        executor.setRejectedExecutionHandler(new ThreadPoolExecutor.CallerRunsPolicy());
+        executor.setRejectedExecutionHandler(new ThreadPoolExecutor.AbortPolicy());
         executor.setWaitForTasksToCompleteOnShutdown(true);
         executor.setAwaitTerminationSeconds(30);
         executor.initialize();

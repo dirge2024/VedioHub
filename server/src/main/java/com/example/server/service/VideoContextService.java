@@ -67,20 +67,12 @@ public class VideoContextService {
         Path workDir = Path.of(System.getProperty("java.io.tmpdir"), "video-context-" + UUID.randomUUID());
         try {
             Files.createDirectories(workDir);
-            CompletableFuture<BranchResult<TranscriptPart>> transcriptFuture = CompletableFuture.supplyAsync(() -> {
-                try {
-                    return BranchResult.success(transcribeBySegments(readableVideoPath, workDir.resolve("audio"), traceId));
-                } catch (Exception e) {
-                    return BranchResult.failure(e);
-                }
-            }, asrExecutor);
-            CompletableFuture<BranchResult<FramePart>> frameFuture = CompletableFuture.supplyAsync(() -> {
-                try {
-                    return BranchResult.success(extractKeyFrames(readableVideoPath, workDir.resolve("frames"), traceId));
-                } catch (Exception e) {
-                    return BranchResult.failure(e);
-                }
-            }, ocrExecutor);
+            CompletableFuture<BranchResult<TranscriptPart>> transcriptFuture = submitBranch(
+                    asrExecutor,
+                    () -> transcribeBySegments(readableVideoPath, workDir.resolve("audio"), traceId));
+            CompletableFuture<BranchResult<FramePart>> frameFuture = submitBranch(
+                    ocrExecutor,
+                    () -> extractKeyFrames(readableVideoPath, workDir.resolve("frames"), traceId));
             try {
                 CompletableFuture.allOf(transcriptFuture, frameFuture).get(60, TimeUnit.MINUTES);
             } catch (TimeoutException e) {
@@ -101,8 +93,14 @@ public class VideoContextService {
                 failure.addSuppressed(frameResult.error());
                 throw failure;
             }
-            if (transcriptResult.failed()) telemetry.increment(traceId, "asrBranchFailures", 1);
-            if (frameResult.failed()) telemetry.increment(traceId, "ocrBranchFailures", 1);
+            if (transcriptResult.failed()) {
+                telemetry.increment(traceId, "asrBranchFailures", 1);
+                log.warn("video_context_asr_branch_failed", transcriptResult.error());
+            }
+            if (frameResult.failed()) {
+                telemetry.increment(traceId, "ocrBranchFailures", 1);
+                log.warn("video_context_ocr_branch_failed", frameResult.error());
+            }
             List<VideoContext.VideoSegment> segments = merge(transcriptResult.items(), frameResult.items());
             if (segments.isEmpty()) throw new IllegalStateException("视频未解析出有效语音或画面文字");
             return new VideoContext(videoPath, userGoal, segments);
@@ -110,6 +108,21 @@ public class VideoContextService {
             throw new IllegalStateException("VideoContext 构建失败", e);
         } finally {
             deleteDirectory(workDir);
+        }
+    }
+
+    private <T> CompletableFuture<BranchResult<T>> submitBranch(
+            Executor executor, ThrowingSupplier<List<T>> work) {
+        try {
+            return CompletableFuture.supplyAsync(() -> {
+                try {
+                    return BranchResult.success(work.get());
+                } catch (Exception e) {
+                    return BranchResult.failure(e);
+                }
+            }, executor);
+        } catch (RuntimeException e) {
+            return CompletableFuture.completedFuture(BranchResult.failure(e));
         }
     }
 
@@ -313,6 +326,11 @@ public class VideoContextService {
         private boolean failed() {
             return error != null;
         }
+    }
+
+    @FunctionalInterface
+    private interface ThrowingSupplier<T> {
+        T get() throws Exception;
     }
 
     private static class SegmentBuilder {

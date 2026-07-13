@@ -45,4 +45,8 @@ public final class AnalysisTaskKeys {
     public static String completed(String contentScope, String goalDigest) {
         return "analysis:completed:" + contentScope + ":" + goalDigest;
     }
+
+    public static String attempts(String contentScope, String goalDigest) {
+        return "analysis:attempts:" + contentScope + ":" + goalDigest;
+    }
 }

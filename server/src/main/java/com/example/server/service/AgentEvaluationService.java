@@ -29,7 +29,7 @@ public class AgentEvaluationService {
 
         AnalysisResult result = state == null ? null : state.result();
         List<AgentFeedback> feedback = checkpointService.loadFeedback(mediaId).stream()
-                .filter(item -> goal.equals(item.goal()))
+                .filter(item -> goal.equals(item.goal()) || goal.equals(item.correctedGoal()))
                 .toList();
 
         Map<String, Object> metrics = new LinkedHashMap<>();

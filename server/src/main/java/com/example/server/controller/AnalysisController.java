@@ -3,7 +3,6 @@ package com.example.server.controller;
 import com.example.server.dto.AgentFeedback;
 import com.example.server.dto.AgentState;
 import com.example.server.dto.AnalysisTaskMsg;
-import com.example.server.dto.TaskStatus;
 import com.example.server.entity.MediaFile;
 import com.example.server.service.AgentCheckpointService;
 import com.example.server.service.AgentEvaluationService;
@@ -20,9 +19,7 @@ import org.redisson.api.RedissonClient;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
-import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -32,16 +29,10 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
-import org.springframework.web.servlet.mvc.method.annotation.StreamingResponseBody;
 
-import java.io.File;
-import java.net.URLEncoder;
-import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
-import java.nio.file.Path;
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.TimeUnit;
 
 @RestController
 @RequestMapping("/analysis")
@@ -49,6 +40,9 @@ public class AnalysisController {
 
     private static final Logger log = LoggerFactory.getLogger(AnalysisController.class);
     private static final int MAX_GOAL_LENGTH = 500;
+    private static final int USER_REQUESTS_PER_MINUTE = 5;
+    private static final int GLOBAL_REQUESTS_PER_MINUTE = 30;
+    private static final Duration ANALYSIS_ACTIVE_TTL = Duration.ofHours(6);
 
     private final AiService aiService;
     private final AgentCheckpointService checkpointService;
@@ -90,59 +84,42 @@ public class AnalysisController {
         if (checkpointService.loadResult(id, normalizedGoal) != null) {
             return ResponseEntity.ok("已有可复用的分析结果");
         }
-        return enqueueAnalysis(mediaFile, normalizedGoal, "START_ANALYSIS");
+        return enqueueAnalysis(mediaFile, normalizedGoal, null);
     }
 
     private ResponseEntity<String> enqueueAnalysis(MediaFile mediaFile,
                                                      String normalizedGoal,
-                                                     String action) {
+                                                     AgentFeedback revision) {
         Long id = mediaFile.getId();
 
-        RRateLimiter rateLimiter = redissonClient.getRateLimiter("limit:ai:global");
-        rateLimiter.trySetRate(RateType.OVERALL, 10, 1, RateIntervalUnit.MINUTES);
-        if (!rateLimiter.tryAcquire()) {
+        if (!tryAcquireAiQuota(mediaFile.getUserId())) {
             return ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS).body("系统繁忙，请稍后再试");
         }
 
-        String contentHash = "REVISE_ANALYSIS".equals(action) ? "media-" + id : contentHash(id);
+        String action = revision == null
+                ? AnalysisTaskMsg.START_ANALYSIS
+                : AnalysisTaskMsg.REVISE_ANALYSIS;
+        String contentHash = revision == null ? contentHash(id) : "media-" + id;
         String goalDigest = AnalysisTaskKeys.goalDigest(normalizedGoal);
         String activeKey = AnalysisTaskKeys.active(contentHash, goalDigest);
         Boolean accepted = redisTemplate.opsForValue().setIfAbsent(
-                activeKey, String.valueOf(id), 2, TimeUnit.HOURS);
+                activeKey, String.valueOf(id), ANALYSIS_ACTIVE_TTL);
         if (!Boolean.TRUE.equals(accepted)) {
             return ResponseEntity.status(HttpStatus.CONFLICT).body("相同视频和分析目标正在处理中");
         }
 
         try {
+            if (revision != null) aiService.stageRevision(revision);
             rocketMQTemplate.convertAndSend(
                     analysisTopic,
                     new AnalysisTaskMsg(id, action, contentHash, normalizedGoal));
             return ResponseEntity.status(HttpStatus.ACCEPTED).body("任务已提交");
         } catch (RuntimeException e) {
             redisTemplate.delete(activeKey);
+            if (revision != null) aiService.cancelStagedRevision(id, normalizedGoal);
             log.error("analysis_dispatch_failed mediaId={} userId={}", id, mediaFile.getUserId(), e);
             return ResponseEntity.internalServerError().body("任务提交失败");
         }
-    }
-
-    @PostMapping("/transcribe")
-    public ResponseEntity<String> transcribe(
-            @RequestParam Long id,
-            @RequestAttribute(AuthService.REQUEST_USER_ID) Long userId) {
-        mediaService.requireOwnedMedia(id, userId);
-        if (!aiService.queueTranscription(id)) {
-            return ResponseEntity.status(HttpStatus.CONFLICT).body("文字提取任务正在处理中");
-        }
-        aiService.asyncTranscribe(id);
-        return ResponseEntity.status(HttpStatus.ACCEPTED).body("提取任务已提交");
-    }
-
-    @GetMapping("/transcription-status")
-    public TaskStatus transcriptionStatus(
-            @RequestParam Long id,
-            @RequestAttribute(AuthService.REQUEST_USER_ID) Long userId) {
-        MediaFile mediaFile = mediaService.requireOwnedMedia(id, userId);
-        return aiService.transcriptionStatus(mediaFile);
     }
 
     @PostMapping("/follow-up")
@@ -171,10 +148,8 @@ public class AnalysisController {
             @RequestAttribute(AuthService.REQUEST_USER_ID) Long userId) {
         validateFeedback(feedback);
         MediaFile mediaFile = mediaService.requireOwnedMedia(feedback.mediaId(), userId);
-        String revisedGoal = aiService.prepareRevision(feedback);
-        redisTemplate.delete(AnalysisTaskKeys.completed(
-                "media-" + mediaFile.getId(), AnalysisTaskKeys.goalDigest(revisedGoal)));
-        return enqueueAnalysis(mediaFile, revisedGoal, "REVISE_ANALYSIS");
+        String revisedGoal = aiService.revisionGoal(feedback);
+        return enqueueAnalysis(mediaFile, revisedGoal, feedback);
     }
 
     @GetMapping("/agent-feedback")
@@ -241,57 +216,6 @@ public class AnalysisController {
         return telemetry.latest(id);
     }
 
-    @GetMapping("/download")
-    public ResponseEntity<StreamingResponseBody> download(
-            @RequestParam Long id,
-            @RequestAttribute(AuthService.REQUEST_USER_ID) Long userId) {
-        MediaFile mediaFile = mediaService.requireOwnedMedia(id, userId);
-        String inputPath = mediaService.readableSource(mediaFile.getFilePath());
-        if (inputPath == null || inputPath.isBlank()) return ResponseEntity.notFound().build();
-        if (!inputPath.startsWith("http") && !Files.isRegularFile(Path.of(inputPath))) {
-            return ResponseEntity.notFound().build();
-        }
-
-        Path outputPath;
-        try {
-            outputPath = Files.createTempFile("dovideo-audio-", ".mp3");
-            runFfmpeg(inputPath, outputPath);
-        } catch (Exception e) {
-            log.error("audio_conversion_failed mediaId={}", id, e);
-            return ResponseEntity.internalServerError().build();
-        }
-
-        StreamingResponseBody body = output -> {
-            try {
-                Files.copy(outputPath, output);
-            } finally {
-                Files.deleteIfExists(outputPath);
-            }
-        };
-        String filename = mediaFile.getFilename() == null
-                ? "audio.mp3"
-                : mediaFile.getFilename().replaceAll("\\.[^.]+$", "") + ".mp3";
-        String encodedName = URLEncoder.encode(filename, StandardCharsets.UTF_8);
-        return ResponseEntity.ok()
-                .contentType(MediaType.parseMediaType("audio/mpeg"))
-                .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename*=UTF-8''" + encodedName)
-                .body(body);
-    }
-
-    private void runFfmpeg(String inputPath, Path outputPath) throws Exception {
-        Process process = new ProcessBuilder(
-                "ffmpeg", "-y", "-i", inputPath,
-                "-vn", "-acodec", "libmp3lame", "-q:a", "2", outputPath.toString())
-                .redirectErrorStream(true)
-                .redirectOutput(ProcessBuilder.Redirect.DISCARD)
-                .start();
-        if (!process.waitFor(15, TimeUnit.MINUTES)) {
-            process.destroyForcibly();
-            throw new IllegalStateException("FFmpeg 执行超时");
-        }
-        if (process.exitValue() != 0) throw new IllegalStateException("FFmpeg 转换失败");
-    }
-
     private String normalizeText(String value, String field) {
         if (value == null || value.isBlank() || value.length() > MAX_GOAL_LENGTH) {
             throw new IllegalArgumentException(field + "不能为空且不能超过 " + MAX_GOAL_LENGTH + " 字");
@@ -302,6 +226,17 @@ public class AnalysisController {
     private String contentHash(Long mediaId) {
         return AnalysisTaskKeys.normalizeContentHash(
                 mediaId, redisTemplate.opsForValue().get("media:md5:" + mediaId));
+    }
+
+    private boolean tryAcquireAiQuota(Long userId) {
+        RRateLimiter userLimiter = redissonClient.getRateLimiter("limit:ai:user:" + userId);
+        userLimiter.trySetRate(RateType.OVERALL, USER_REQUESTS_PER_MINUTE, 1, RateIntervalUnit.MINUTES);
+        if (!userLimiter.tryAcquire()) return false;
+
+        RRateLimiter globalLimiter = redissonClient.getRateLimiter("limit:ai:global");
+        globalLimiter.trySetRate(
+                RateType.OVERALL, GLOBAL_REQUESTS_PER_MINUTE, 1, RateIntervalUnit.MINUTES);
+        return globalLimiter.tryAcquire();
     }
 
     private void validateFeedback(AgentFeedback feedback) {

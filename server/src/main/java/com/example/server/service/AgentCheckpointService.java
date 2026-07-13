@@ -12,8 +12,10 @@ import org.slf4j.LoggerFactory;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.TimeUnit;
 
 @Service
@@ -75,23 +77,52 @@ public class AgentCheckpointService {
     public void saveResult(Long mediaId, AgentState state) {
         String stage = state.critique() != null && state.critique().passed()
                 ? "ANALYSIS_COMPLETED" : "ANALYSIS_COMPLETED_WITH_WARNINGS";
-        write(goalKey(mediaId, state.goal()), "result", stage, state);
+        String key = goalKey(mediaId, state.goal());
+        write(key, "result", stage, state);
+        rememberGoalKey(mediaId, key);
     }
 
     public void savePlan(Long mediaId, String goal, AgentState.AgentPlan plan) {
-        write(goalKey(mediaId, goal), "plan", "PLAN_COMPLETED", plan);
+        String key = goalKey(mediaId, goal);
+        write(key, "plan", "PLAN_COMPLETED", plan);
+        rememberGoalKey(mediaId, key);
     }
 
     public void saveCriticState(Long mediaId, AgentState state) {
         String stage = state.critique() != null && state.critique().passed()
                 ? "CRITIC_PASSED" : "CRITIC_RETRY_REQUIRED";
-        write(goalKey(mediaId, state.goal()), "criticState", stage, state);
+        String key = goalKey(mediaId, state.goal());
+        write(key, "criticState", stage, state);
+        rememberGoalKey(mediaId, key);
     }
 
-    public void resetForRerun(Long mediaId, String goal, AgentState.AgentPlan plan) {
-        String key = goalKey(mediaId, goal);
-        redisTemplate.delete(key);
+    public void stageRevision(Long mediaId, String goal, AgentState.AgentPlan plan) {
+        String key = revisionKey(mediaId, goal);
+        try {
+            redisTemplate.opsForHash().put(key, "pending", "1");
+            if (plan != null) {
+                redisTemplate.opsForHash().put(key, "plan", objectMapper.writeValueAsString(plan));
+            }
+            redisTemplate.expire(key, 2, TimeUnit.HOURS);
+            rememberGoalKey(mediaId, key);
+        } catch (Exception e) {
+            throw new IllegalStateException("暂存 Agent 修正计划失败", e);
+        }
+    }
+
+    public boolean beginStagedRevision(Long mediaId, String goal) {
+        String revisionKey = revisionKey(mediaId, goal);
+        if (!Boolean.TRUE.equals(redisTemplate.hasKey(revisionKey))) return false;
+
+        AgentState.AgentPlan plan = read(revisionKey, "plan", AgentState.AgentPlan.class);
+        redisTemplate.delete(goalKey(mediaId, goal));
         if (plan != null) savePlan(mediaId, goal, plan);
+        redisTemplate.delete(revisionKey);
+        return true;
+    }
+
+    public void cancelStagedRevision(Long mediaId, String goal) {
+        redisTemplate.delete(revisionKey(mediaId, goal));
     }
 
     public void saveFeedback(AgentFeedback feedback) {
@@ -124,6 +155,17 @@ public class AgentCheckpointService {
         redisTemplate.opsForHash().put(key, "failedStage", failedStage);
         redisTemplate.opsForHash().put(key, "errorType", error.getClass().getSimpleName());
         redisTemplate.expire(key, 7, TimeUnit.DAYS);
+        rememberGoalKey(mediaId, key);
+    }
+
+    public void deleteMedia(Long mediaId) {
+        Set<String> goalKeys = redisTemplate.opsForSet().members(goalIndexKey(mediaId));
+        List<String> keys = new ArrayList<>();
+        keys.add(checkpointKey(mediaId));
+        keys.add(feedbackKey(mediaId));
+        keys.add(goalIndexKey(mediaId));
+        if (goalKeys != null) keys.addAll(goalKeys);
+        redisTemplate.delete(keys);
     }
 
     private <T> T read(String key, String field, Class<T> type) {
@@ -152,6 +194,15 @@ public class AgentCheckpointService {
         }
     }
 
+    private void rememberGoalKey(Long mediaId, String key) {
+        try {
+            redisTemplate.opsForSet().add(goalIndexKey(mediaId), key);
+            redisTemplate.expire(goalIndexKey(mediaId), 7, TimeUnit.DAYS);
+        } catch (RuntimeException e) {
+            log.warn("agent_checkpoint_index_write_failed mediaId={} key={}", mediaId, key, e);
+        }
+    }
+
     private String checkpointKey(Long mediaId) {
         return "agent:checkpoint:" + mediaId;
     }
@@ -162,5 +213,13 @@ public class AgentCheckpointService {
 
     private String feedbackKey(Long mediaId) {
         return "agent:feedback:" + mediaId;
+    }
+
+    private String revisionKey(Long mediaId, String goal) {
+        return goalKey(mediaId, goal) + ":revision";
+    }
+
+    private String goalIndexKey(Long mediaId) {
+        return checkpointKey(mediaId) + ":goals";
     }
 }

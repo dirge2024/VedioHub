@@ -137,6 +137,16 @@ public class AgentTelemetry {
         }
     }
 
+    public void deleteTask(Long taskId) {
+        String traceId = latestTraceByTask.remove(taskId);
+        if (traceId == null) traceId = redisTemplate.opsForValue().get(latestTraceKey(taskId));
+        if (traceId != null) {
+            traces.remove(traceId);
+            redisTemplate.delete(traceKey(traceId));
+        }
+        redisTemplate.delete(latestTraceKey(taskId));
+    }
+
     private void persist(TraceData trace) {
         try {
             redisTemplate.opsForValue().set(

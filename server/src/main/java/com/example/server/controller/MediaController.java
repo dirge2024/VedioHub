@@ -2,6 +2,7 @@ package com.example.server.controller;
 
 import com.example.server.dto.MediaSummary;
 import com.example.server.service.AuthService;
+import com.example.server.service.ChunkUploadService;
 import com.example.server.service.MediaService;
 import com.example.server.utils.MinioUtils;
 import com.example.server.utils.YtDlpUtils;
@@ -30,11 +31,16 @@ public class MediaController {
 
     private final MinioUtils minioUtils;
     private final YtDlpUtils ytDlpUtils;
+    private final ChunkUploadService chunkUploadService;
     private final MediaService mediaService;
 
-    public MediaController(MinioUtils minioUtils, YtDlpUtils ytDlpUtils, MediaService mediaService) {
+    public MediaController(MinioUtils minioUtils,
+                           YtDlpUtils ytDlpUtils,
+                           ChunkUploadService chunkUploadService,
+                           MediaService mediaService) {
         this.minioUtils = minioUtils;
         this.ytDlpUtils = ytDlpUtils;
+        this.chunkUploadService = chunkUploadService;
         this.mediaService = mediaService;
     }
 
@@ -43,7 +49,7 @@ public class MediaController {
                                              @RequestParam int totalChunks,
                                              @RequestAttribute(AuthService.REQUEST_USER_ID) Long userId) {
         try {
-            return ResponseEntity.ok(mediaService.initChunkedUpload(filename, totalChunks, userId));
+            return ResponseEntity.ok(chunkUploadService.initialize(filename, totalChunks, userId));
         } catch (IllegalArgumentException e) {
             return ResponseEntity.badRequest().body(e.getMessage());
         } catch (Exception e) {
@@ -56,7 +62,7 @@ public class MediaController {
     public ResponseEntity<Set<Integer>> uploadStatus(
             @RequestParam String uploadId,
             @RequestAttribute(AuthService.REQUEST_USER_ID) Long userId) {
-        return ResponseEntity.ok(mediaService.getUploadedChunks(uploadId, userId));
+        return ResponseEntity.ok(chunkUploadService.uploadedChunks(uploadId, userId));
     }
 
     @PostMapping("/upload-chunk")
@@ -66,7 +72,7 @@ public class MediaController {
                                               @RequestParam("file") MultipartFile file,
                                               @RequestAttribute(AuthService.REQUEST_USER_ID) Long userId) {
         try {
-            mediaService.uploadChunk(uploadId, chunkIndex, totalChunks, file, userId);
+            chunkUploadService.uploadChunk(uploadId, chunkIndex, totalChunks, file, userId);
             return ResponseEntity.ok("Chunk uploaded");
         } catch (SecurityException e) {
             return ResponseEntity.status(HttpStatus.FORBIDDEN).body(e.getMessage());
@@ -83,7 +89,7 @@ public class MediaController {
             @RequestParam String uploadId,
             @RequestAttribute(AuthService.REQUEST_USER_ID) Long userId) {
         try {
-            mediaService.completeChunkedUpload(uploadId, userId);
+            chunkUploadService.complete(uploadId, userId);
             return ResponseEntity.ok("Upload success");
         } catch (SecurityException e) {
             return ResponseEntity.status(HttpStatus.FORBIDDEN).body(e.getMessage());

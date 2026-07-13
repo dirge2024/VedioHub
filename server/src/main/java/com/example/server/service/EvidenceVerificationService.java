@@ -34,6 +34,9 @@ public class EvidenceVerificationService {
     }
 
     private String sourceText(VideoContext.VideoSegment segment, String source) {
+        if (source.contains("ASR") && source.contains("OCR")) {
+            return segment.transcript() + " " + String.join(" ", segment.ocrTexts());
+        }
         if (source.contains("ASR")) return segment.transcript();
         return String.join(" ", segment.ocrTexts());
     }

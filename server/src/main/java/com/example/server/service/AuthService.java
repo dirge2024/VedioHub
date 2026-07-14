@@ -1,5 +1,13 @@
 package com.example.server.service;
 
+import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
+import com.example.server.dto.AuthRequest;
+import com.example.server.dto.AuthResponse;
+import com.example.server.entity.User;
+import com.example.server.mapper.UserMapper;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.dao.DuplicateKeyException;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 
@@ -16,6 +24,7 @@ public class AuthService {
 
     public static final String REQUEST_USER_ID = "authenticatedUserId";
 
+    private static final Logger log = LoggerFactory.getLogger(AuthService.class);
     private static final String PASSWORD_PREFIX = "pbkdf2";
     private static final int PASSWORD_ITERATIONS = 210_000;
     private static final int PASSWORD_KEY_BITS = 256;
@@ -26,12 +35,76 @@ public class AuthService {
     private static final String LOGIN_FAILURE_PREFIX = "auth:login-failures:";
     private static final int MAX_LOGIN_FAILURES = 8;
     private static final long LOGIN_FAILURE_WINDOW_MINUTES = 10;
+    private static final int MAX_PASSWORD_LENGTH = 128;
+    private static final int MAX_NICKNAME_LENGTH = 50;
 
     private final StringRedisTemplate redisTemplate;
+    private final UserMapper userMapper;
     private final SecureRandom secureRandom = new SecureRandom();
 
-    public AuthService(StringRedisTemplate redisTemplate) {
+    public AuthService(StringRedisTemplate redisTemplate, UserMapper userMapper) {
         this.redisTemplate = redisTemplate;
+        this.userMapper = userMapper;
+    }
+
+    public AuthResponse register(AuthRequest request) {
+        String username = normalizeUsername(request.username());
+        String password = request.password();
+        if (username == null || password == null || password.length() < 8
+                || password.length() > MAX_PASSWORD_LENGTH) {
+            return response(400, "账号需为 3-32 位字母、数字或下划线，密码需为 8-128 位", null, null);
+        }
+
+        String nickname = normalizeNickname(request.nickname());
+        if (nickname == null) {
+            return response(400, "昵称不能超过 50 个字符", null, null);
+        }
+
+        QueryWrapper<User> query = new QueryWrapper<>();
+        query.eq("username", username);
+        if (userMapper.selectCount(query) > 0) {
+            return response(409, "该账号已存在", null, null);
+        }
+
+        User user = new User();
+        user.setUsername(username);
+        user.setPassword(hashPassword(password));
+        user.setNickname(nickname.isBlank() ? "用户" + System.currentTimeMillis() : nickname);
+        user.setRole("USER");
+        try {
+            userMapper.insert(user);
+        } catch (DuplicateKeyException error) {
+            return response(409, "该账号已存在", null, null);
+        }
+        log.info("user_registered userId={} username={}", user.getId(), username);
+        return response(200, "注册成功", userView(user), null);
+    }
+
+    public AuthResponse login(AuthRequest request) {
+        String username = normalizeUsername(request.username());
+        if (username == null || request.password() == null || request.password().isBlank()) {
+            return response(400, "请输入账号和密码", null, null);
+        }
+        if (!loginAttemptAllowed(username)) {
+            return response(429, "登录尝试过于频繁，请稍后再试", null, null);
+        }
+
+        QueryWrapper<User> query = new QueryWrapper<>();
+        query.eq("username", username);
+        User user = userMapper.selectOne(query);
+        if (user == null || !passwordMatches(request.password(), user.getPassword())) {
+            recordLoginFailure(username);
+            return response(401, "账号或密码错误", null, null);
+        }
+
+        if (!isHashed(user.getPassword())) {
+            user.setPassword(hashPassword(request.password()));
+            userMapper.updateById(user);
+        }
+        clearLoginFailures(username);
+        String token = createSession(user.getId());
+        log.info("user_logged_in userId={}", user.getId());
+        return response(200, "登录成功", userView(user), token);
     }
 
     public String hashPassword(String password) {
@@ -109,6 +182,30 @@ public class AuthService {
 
     public void clearLoginFailures(String username) {
         redisTemplate.delete(LOGIN_FAILURE_PREFIX + username);
+    }
+
+    private String normalizeUsername(String username) {
+        if (username == null) return null;
+        String normalized = username.trim();
+        return normalized.matches("[A-Za-z0-9_]{3,32}") ? normalized : null;
+    }
+
+    private String normalizeNickname(String nickname) {
+        if (nickname == null || nickname.isBlank()) return "";
+        String normalized = nickname.trim();
+        return normalized.length() <= MAX_NICKNAME_LENGTH ? normalized : null;
+    }
+
+    private AuthResponse.UserInfo userView(User user) {
+        return new AuthResponse.UserInfo(
+                user.getId(), user.getUsername(), user.getNickname(), user.getAvatar(), user.getRole());
+    }
+
+    private AuthResponse response(int code,
+                                  String message,
+                                  AuthResponse.UserInfo userInfo,
+                                  String token) {
+        return new AuthResponse(code, message, userInfo, token);
     }
 
     private String bearerToken(String authorization) {

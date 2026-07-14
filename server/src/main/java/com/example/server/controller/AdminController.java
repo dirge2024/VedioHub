@@ -1,8 +1,6 @@
 package com.example.server.controller;
 
 import com.example.server.entity.FailedAnalysisTask;
-import com.example.server.entity.User;
-import com.example.server.mapper.UserMapper;
 import com.example.server.service.AuthService;
 import com.example.server.service.FailedAnalysisTaskService;
 import org.springframework.http.HttpStatus;
@@ -21,17 +19,17 @@ import java.util.List;
 public class AdminController {
 
     private final FailedAnalysisTaskService failedTaskService;
-    private final UserMapper userMapper;
+    private final AuthService authService;
 
-    public AdminController(FailedAnalysisTaskService failedTaskService, UserMapper userMapper) {
+    public AdminController(FailedAnalysisTaskService failedTaskService, AuthService authService) {
         this.failedTaskService = failedTaskService;
-        this.userMapper = userMapper;
+        this.authService = authService;
     }
 
     @GetMapping
     public List<FailedAnalysisTask> latest(
             @RequestAttribute(AuthService.REQUEST_USER_ID) Long userId) {
-        requireAdmin(userId);
+        authService.requireAdmin(userId);
         return failedTaskService.latest();
     }
 
@@ -39,15 +37,8 @@ public class AdminController {
     public ResponseEntity<String> replay(
             @PathVariable Long id,
             @RequestAttribute(AuthService.REQUEST_USER_ID) Long userId) {
-        requireAdmin(userId);
+        authService.requireAdmin(userId);
         failedTaskService.replay(id);
         return ResponseEntity.status(HttpStatus.ACCEPTED).body("失败任务已重新入队");
-    }
-
-    private void requireAdmin(Long userId) {
-        User user = userMapper.selectById(userId);
-        if (user == null || !"ADMIN".equals(user.getRole())) {
-            throw new SecurityException("仅管理员可操作失败任务");
-        }
     }
 }

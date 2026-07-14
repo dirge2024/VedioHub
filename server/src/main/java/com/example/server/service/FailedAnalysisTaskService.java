@@ -8,6 +8,8 @@ import com.example.server.entity.FailedAnalysisTask;
 import com.example.server.mapper.FailedAnalysisTaskMapper;
 import com.example.server.utils.AnalysisTaskKeys;
 import org.apache.rocketmq.spring.core.RocketMQTemplate;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
@@ -20,6 +22,7 @@ import java.util.NoSuchElementException;
 @Service
 public class FailedAnalysisTaskService {
 
+    private static final Logger log = LoggerFactory.getLogger(FailedAnalysisTaskService.class);
     private static final Duration ACTIVE_TTL = Duration.ofHours(6);
     private static final String STATUS_FAILED = "FAILED";
     private static final String STATUS_REQUEUED = "REQUEUED";
@@ -79,19 +82,35 @@ public class FailedAnalysisTaskService {
                 activeKey, String.valueOf(task.getMediaId()), ACTIVE_TTL);
         if (!Boolean.TRUE.equals(accepted)) throw new IllegalArgumentException("相同任务正在处理中");
 
+        boolean dispatched = false;
         try {
             redisTemplate.delete(AnalysisTaskKeys.attempts(contentHash, goalDigest));
             rocketMQTemplate.convertAndSend(analysisTopic, new AnalysisTaskMsg(
                     task.getMediaId(), task.getAction(), contentHash, task.getUserGoal()));
+            dispatched = true;
             task.setStatus(STATUS_REQUEUED);
             task.setUpdatedAt(LocalDateTime.now());
-            taskMapper.updateById(task);
+            if (taskMapper.updateById(task) != 1) {
+                throw new IllegalStateException("失败任务重放台账更新失败");
+            }
+        } catch (RuntimeException e) {
+            if (!dispatched) {
+                redisTemplate.delete(activeKey);
+            } else {
+                // 消息已发出时保留幂等键，避免台账更新失败诱发重复重放。
+                log.error("failed_analysis_replay_bookkeeping_failed taskId={} mediaId={}",
+                        id, task.getMediaId(), e);
+            }
+            throw e;
+        }
+
+        try {
             taskEventService.publishAnalysis(task.getMediaId(), task.getUserGoal(),
                     TaskStatus.of(TaskStatus.State.QUEUED, "失败任务已由管理员重新入队"),
                     TaskStage.MANUAL_REPLAY);
-        } catch (RuntimeException e) {
-            redisTemplate.delete(activeKey);
-            throw e;
+        } catch (RuntimeException eventError) {
+            log.warn("failed_analysis_replay_event_failed taskId={} mediaId={}",
+                    id, task.getMediaId(), eventError);
         }
     }
 

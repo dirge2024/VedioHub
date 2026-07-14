@@ -56,7 +56,6 @@ public class LongVideoContextService {
             }
         } else {
             telemetry.incrementCurrent("chunkCheckpointHits", 1);
-            indexChunks(mediaId, chunks);
         }
         List<Double> queryEmbedding = safeEmbed(context.userGoal());
 

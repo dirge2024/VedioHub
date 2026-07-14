@@ -45,8 +45,9 @@ public class DeepSeekUtils {
     public AgentState.AgentPlan plan(VideoContext context) {
         try {
             String prompt = """
-                    你是 Video Agent 的 Planner。理解用户目标，并拆成 3 到 5 个可执行任务。
+                    你是 Video Agent 的 Planner。理解用户目标，并拆成 1 到 5 个可执行任务。
                     任务必须能够仅依靠 VideoContext 中的 ASR、OCR 和时间戳证据完成。
+                    任务按执行顺序排列，每项只描述一个可验证的分析动作。
                     只返回 JSON：
                     {
                       "understoodGoal": "对用户目标的明确理解",
@@ -54,9 +55,36 @@ public class DeepSeekUtils {
                     }
                     VideoContext:
                     """ + objectMapper.writeValueAsString(context);
-            return parseJson(chat("PLANNER", prompt), AgentState.AgentPlan.class);
+            return structuredChat("PLANNER", prompt, AgentState.AgentPlan.class);
         } catch (Exception e) {
             throw new IllegalStateException("Agent 任务规划失败", e);
+        }
+    }
+
+    public AgentState.AgentPlan replan(VideoContext context,
+                                       AgentState.AgentPlan currentPlan,
+                                       AgentState.CriticResult critique) {
+        try {
+            String prompt = """
+                    你是 Video Agent 的 Planner。Critic 发现当前计划遗漏了用户要求，请修订计划。
+                    保留仍然有效的任务，只补充或调整遗漏部分，最终保持 1 到 5 个有序、可验证的任务。
+                    任务必须能够仅依靠 VideoContext 中的 ASR、OCR 和时间戳证据完成。
+                    只返回 JSON：
+                    {
+                      "understoodGoal": "修订后对用户目标的明确理解",
+                      "tasks": ["任务1", "任务2", "任务3"]
+                    }
+                    CurrentPlan:
+                    """ + objectMapper.writeValueAsString(currentPlan) + """
+
+                    Critic:
+                    """ + objectMapper.writeValueAsString(critique) + """
+
+                    VideoContext:
+                    """ + objectMapper.writeValueAsString(context);
+            return structuredChat("REPLANNER", prompt, AgentState.AgentPlan.class);
+        } catch (Exception e) {
+            throw new IllegalStateException("Agent 任务重规划失败", e);
         }
     }
 
@@ -83,9 +111,10 @@ public class DeepSeekUtils {
         try {
             String prompt = """
                     你是 Video Agent 的 Executor。按照计划分析 VideoContext 并生成结构化产物。
+                    逐项执行 Plan 中的任务，最终产物必须覆盖全部任务。
                     所有重要结论必须绑定真实 timestampMs，并标明来源为 ASR 或 OCR。
                     不得使用视频上下文之外的事实。
-                    如果存在 Critic 反馈，必须逐项修正。
+                    如果存在 Critic 反馈，只修正被指出的问题，并保留已经核验通过的结论和证据。
 
                     只返回 JSON：
                     {
@@ -105,7 +134,7 @@ public class DeepSeekUtils {
 
                     VideoContext:
                     """ + objectMapper.writeValueAsString(context);
-            return parseJson(chat("EXECUTOR", prompt), AnalysisResult.class);
+            return structuredChat("EXECUTOR", prompt, AnalysisResult.class);
         } catch (Exception e) {
             throw new IllegalStateException("Agent 执行失败", e);
         }
@@ -124,7 +153,10 @@ public class DeepSeekUtils {
                     4. title、conclusions、evidence、suggestions 是否完整。
 
                     只有全部满足时 passed 才能为 true。
-                    requiredTimestamps 填写需要重新读取或补充分析的时间戳毫秒值。
+                    feedback 只填写能够基于当前 VideoContext 直接重写的修改动作。
+                    missingRequirements 填写未覆盖的用户目标或 Planner 任务。
+                    unsupportedClaims 填写当前 VideoContext 无法支持、需要重新检索证据的结论。
+                    requiredTimestamps 只填写需要定向加载原始证据的时间戳；无需补充证据时返回空数组。
                     只返回 JSON：
                     {
                       "passed": false,
@@ -142,7 +174,7 @@ public class DeepSeekUtils {
 
                     VideoContext:
                     """ + objectMapper.writeValueAsString(context);
-            return parseJson(chat("CRITIC", prompt), AgentState.CriticResult.class);
+            return structuredChat("CRITIC", prompt, AgentState.CriticResult.class);
         } catch (Exception e) {
             throw new IllegalStateException("Critic 校验失败", e);
         }
@@ -161,6 +193,16 @@ public class DeepSeekUtils {
         if (start < 0 || end <= start) throw new IllegalStateException("模型未返回 JSON 对象");
         json = json.substring(start, end + 1);
         return objectMapper.readValue(json, type);
+    }
+
+    private <T> T structuredChat(String stage, String prompt, Class<T> type) throws Exception {
+        String response = chat(stage, prompt);
+        try {
+            return parseJson(response, type);
+        } catch (Exception e) {
+            telemetry.incrementCurrent("structuredOutputRetries", 1);
+            return parseJson(chat(stage, prompt + "\n请严格返回合法 JSON，不要添加解释或代码块。"), type);
+        }
     }
 
     private String chat(String stage, String prompt) {

@@ -8,6 +8,9 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Repository;
+import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import java.time.Duration;
 
@@ -64,6 +67,7 @@ public class AgentCheckpointRepository {
         return TaskStage.from(persisted);
     }
 
+    @Transactional
     public void write(Long mediaId,
                       String checkpointName,
                       String stageCheckpointName,
@@ -76,7 +80,7 @@ public class AgentCheckpointRepository {
             // 数据库是恢复真源，缓存失效只影响速度，不影响用户继续任务。
             checkpointMapper.upsert(mediaId, checkpointName, stage.name(), payload);
             checkpointMapper.upsert(mediaId, stageCheckpointName, stage.name(), null);
-            cacheField(redisKey, field, payload, stage.name());
+            afterCommit(() -> cacheField(redisKey, field, payload, stage.name()));
         } catch (Exception e) {
             throw new IllegalStateException("保存 Agent Checkpoint 失败", e);
         }
@@ -146,6 +150,19 @@ public class AgentCheckpointRepository {
         } catch (RuntimeException cleanupError) {
             originalError.addSuppressed(cleanupError);
         }
+    }
+
+    private void afterCommit(Runnable action) {
+        if (!TransactionSynchronizationManager.isActualTransactionActive()) {
+            action.run();
+            return;
+        }
+        TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+            @Override
+            public void afterCommit() {
+                action.run();
+            }
+        });
     }
 
     @FunctionalInterface

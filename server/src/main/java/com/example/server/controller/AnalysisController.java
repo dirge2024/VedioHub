@@ -199,9 +199,9 @@ public class AnalysisController {
             throw new IllegalArgumentException("错误类型不能超过 64 字");
         }
         if (feedback.correctedTasks() != null
-                && (feedback.correctedTasks().size() > 8
+                && (feedback.correctedTasks().size() > 5
                 || feedback.correctedTasks().stream().anyMatch(task -> task == null || task.length() > 500))) {
-            throw new IllegalArgumentException("修正任务最多 8 条且每条不能超过 500 字");
+            throw new IllegalArgumentException("修正任务最多 5 条且每条不能超过 500 字");
         }
         if (feedback.evidenceTimestamp() != null && feedback.evidenceTimestamp() < 0) {
             throw new IllegalArgumentException("证据时间戳不能为负数");

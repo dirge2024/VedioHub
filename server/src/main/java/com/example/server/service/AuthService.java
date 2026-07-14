@@ -107,6 +107,13 @@ public class AuthService {
         return response(200, "登录成功", userView(user), token);
     }
 
+    public void requireAdmin(Long userId) {
+        User user = userMapper.selectById(userId);
+        if (user == null || !"ADMIN".equals(user.getRole())) {
+            throw new SecurityException("仅管理员可操作失败任务");
+        }
+    }
+
     public String hashPassword(String password) {
         byte[] salt = new byte[SALT_BYTES];
         secureRandom.nextBytes(salt);

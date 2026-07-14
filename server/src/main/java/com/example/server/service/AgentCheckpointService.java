@@ -13,6 +13,9 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import java.time.Duration;
 import java.util.ArrayList;
@@ -124,6 +127,7 @@ public class AgentCheckpointService {
         }
     }
 
+    @Transactional
     public boolean beginStagedRevision(Long mediaId, String goal) {
         String revisionKey = revisionKey(mediaId, goal);
         if (!Boolean.TRUE.equals(redisTemplate.hasKey(revisionKey))) return false;
@@ -132,7 +136,16 @@ public class AgentCheckpointService {
         checkpointRepository.deleteByPrefix(mediaId, goalCheckpoint(goal, ""));
         redisTemplate.delete(goalKey(mediaId, goal));
         if (plan != null) savePlan(mediaId, goal, plan);
-        redisTemplate.delete(revisionKey);
+        TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+            @Override
+            public void afterCommit() {
+                try {
+                    redisTemplate.delete(revisionKey);
+                } catch (RuntimeException e) {
+                    log.warn("agent_revision_cleanup_failed key={}", revisionKey, e);
+                }
+            }
+        });
         return true;
     }
 

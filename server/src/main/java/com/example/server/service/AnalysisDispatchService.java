@@ -71,15 +71,22 @@ public class AnalysisDispatchService {
             rocketMQTemplate.convertAndSend(
                     analysisTopic,
                     new AnalysisTaskMsg(mediaId, action, contentHash, goal));
-            taskEventService.publishAnalysis(mediaId, goal,
-                    TaskStatus.of(TaskStatus.State.QUEUED, "任务已进入异步分析队列"), TaskStage.QUEUED);
-            return SubmissionResult.ACCEPTED;
         } catch (RuntimeException e) {
             redisTemplate.delete(activeKey);
             if (revision != null) aiService.cancelStagedRevision(mediaId, goal);
             log.error("analysis_dispatch_failed mediaId={} userId={}", mediaId, mediaFile.getUserId(), e);
             return SubmissionResult.FAILED;
         }
+
+        try {
+            taskEventService.publishAnalysis(mediaId, goal,
+                    TaskStatus.of(TaskStatus.State.QUEUED, "任务已进入异步分析队列"), TaskStage.QUEUED);
+        } catch (RuntimeException eventError) {
+            // MQ 已经接单，通知失败不能把任务伪装成投递失败。
+            log.warn("analysis_queued_event_failed mediaId={} userId={}",
+                    mediaId, mediaFile.getUserId(), eventError);
+        }
+        return SubmissionResult.ACCEPTED;
     }
 
     public boolean isActive(Long mediaId, String goal) {

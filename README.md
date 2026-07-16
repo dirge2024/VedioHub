@@ -18,7 +18,6 @@
 
 DoVideoAI 将长视频转化为可检索、可追溯、可继续追问的结构化知识。
 
-系统融合 ASR 与关键帧 OCR 构建多模态 <code>VideoContext</code>，再由 Planner、Executor 与 Critic 围绕用户目标完成分析和证据校验。
 
 </div>
 

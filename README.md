@@ -1,4 +1,6 @@
 <div align="center">
+  <h2>DoVideoAI</h2>
+  
   <p>
     <a href="https://github.com/Xiaoc7r/DOVideo-AI/stargazers"><img src="https://img.shields.io/github/stars/Xiaoc7r/DOVideo-AI?style=flat-square" alt="GitHub Stars"></a>
     <img src="https://img.shields.io/badge/Java-21-E76F00?style=flat-square" alt="Java 21">
@@ -16,7 +18,7 @@
 
 面向长视频内容理解的 <strong>Video Agent</strong>。
 
-DoVideoAI 将长视频转化为可检索、可追溯、可继续追问的结构化知识。
+致力于将长视频转化为可检索、可追溯、可继续追问的结构化知识。
 
 
 </div>

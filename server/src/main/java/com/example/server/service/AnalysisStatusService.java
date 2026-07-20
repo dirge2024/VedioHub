@@ -26,7 +26,7 @@ public class AnalysisStatusService {
         TaskStage stage = checkpointService.loadStage(mediaId, goal);
         if (dispatchService.isActive(mediaId, goal)) {
             TaskStatus.State state = stage == null ? TaskStatus.State.QUEUED : TaskStatus.State.PROCESSING;
-            return TaskStatus.of(state, state == TaskStatus.State.QUEUED ? "任务已排队" : "正在分析");
+            return TaskStatus.of(state, statusMessage(stage));
         }
         if (stage == TaskStage.FAILED || stage == TaskStage.DEAD_LETTERED) {
             return TaskStatus.of(TaskStatus.State.FAILED, "分析失败，请稍后重试");
@@ -36,5 +36,19 @@ public class AnalysisStatusService {
 
     public TaskStage stage(Long mediaId, String goal) {
         return checkpointService.loadStage(mediaId, goal);
+    }
+
+    private String statusMessage(TaskStage stage) {
+        if (stage == null || stage == TaskStage.QUEUED) return "任务已排队";
+        return switch (stage) {
+            case VIDEO_CONTEXT, CONTEXT_COMPLETED -> "正在解析视频语音和关键画面";
+            case CHUNKS_COMPLETED -> "正在检索与目标相关的视频证据";
+            case PLAN_COMPLETED -> "Planner 已完成任务拆解";
+            case EXECUTOR_STARTED, EXECUTOR_COMPLETED -> "Executor 正在生成结构化产物";
+            case CRITIC_STARTED -> "Critic 正在核验结论和证据";
+            case CRITIC_RETRY_REQUIRED, EVIDENCE_REFRESHED -> "正在根据 Critic 反馈补充证据";
+            case RETRYING -> "任务执行异常，正在自动重试";
+            default -> "正在分析视频";
+        };
     }
 }

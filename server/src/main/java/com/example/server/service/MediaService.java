@@ -144,12 +144,6 @@ public class MediaService {
 
     public void deleteOwnedMedia(Long mediaId, Long userId) {
         MediaFile mediaFile = requireOwnedMedia(mediaId, userId);
-        VideoContext context = null;
-        try {
-            context = checkpointService.loadContext(mediaId);
-        } catch (RuntimeException e) {
-            log.warn("media_evidence_manifest_read_failed mediaId={}", mediaId, e);
-        }
         mediaFileMapper.deleteById(mediaId);
         if (mediaFile.getFilePath() != null && mediaFile.getFilePath().startsWith("http")) {
             try {
@@ -158,6 +152,21 @@ public class MediaService {
                 log.warn("media_object_cleanup_failed mediaId={} path={}",
                         mediaId, mediaFile.getFilePath(), e);
             }
+        }
+        purgeRuntimeArtifacts(mediaId);
+        invalidateUserList(userId);
+    }
+
+    public boolean exists(Long mediaId) {
+        return mediaId != null && mediaFileMapper.selectById(mediaId) != null;
+    }
+
+    public void purgeRuntimeArtifacts(Long mediaId) {
+        VideoContext context = null;
+        try {
+            context = checkpointService.loadContext(mediaId);
+        } catch (RuntimeException e) {
+            log.warn("media_evidence_manifest_read_failed mediaId={}", mediaId, e);
         }
         videoContextService.deleteEvidenceFrames(context);
         try {
@@ -171,7 +180,6 @@ public class MediaService {
         } catch (RuntimeException e) {
             log.warn("media_runtime_cleanup_failed mediaId={}", mediaId, e);
         }
-        invalidateUserList(userId);
     }
 
     public void invalidateUserList(Long userId) {

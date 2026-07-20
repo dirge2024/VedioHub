@@ -57,7 +57,9 @@ export async function uploadVideoInChunks(file, onProgress = () => {}) {
   if (!completeResponse.ok) {
     throw new Error(await completeResponse.text() || 'Upload merge failed')
   }
+  const media = await completeResponse.json()
   localStorage.removeItem(storageKey)
+  return media
 }
 
 async function initializeUpload(filename, totalChunks) {

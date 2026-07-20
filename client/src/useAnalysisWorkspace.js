@@ -42,12 +42,14 @@ function createSidebarState() {
     goal: DEFAULT_GOAL,
     playbackUrl: '',
     playbackLoading: false,
+    playbackError: '',
     followUp: '',
     followUpLoading: false,
     plan: null,
     trace: null,
     evaluation: null,
     feedback: null,
+    feedbackLoading: false,
     editingPlan: false,
     planDraft: [],
     rerunLoading: false
@@ -65,6 +67,9 @@ export function useAnalysisWorkspace({
   const traceStages = computed(() => Object.entries(sidebar.value.trace?.stageDurationMs || {})
     .map(([stage, duration]) => [STAGE_LABELS[stage] || stage, formatDuration(duration)]))
   const renderedMarkdown = computed(() => renderMarkdown(sidebar.value.content))
+  const isCurrentWorkspace = (id, type, goal = null) => sidebar.value.mediaId === id
+    && sidebar.value.type === type
+    && (goal === null || sidebar.value.goal === goal)
 
   const openSidebar = (type, title) => {
     sidebar.value.visible = true
@@ -83,13 +88,21 @@ export function useAnalysisWorkspace({
 
   const loadPlayback = async id => {
     sidebar.value.playbackLoading = true
+    sidebar.value.playbackError = ''
     try {
       const response = await apiRequest(`/media/playback?id=${id}`)
       const url = await response.text()
       if (!response.ok) throw new Error(url || '视频加载失败')
-      if (sidebar.value.mediaId === id) sidebar.value.playbackUrl = url
+      if (sidebar.value.mediaId === id) {
+        sidebar.value.playbackUrl = url
+        sidebar.value.playbackError = ''
+      }
     } catch (error) {
       console.warn('Video preview unavailable', error)
+      if (sidebar.value.mediaId === id) {
+        sidebar.value.playbackUrl = ''
+        sidebar.value.playbackError = error.message || '原视频暂时无法加载'
+      }
     } finally {
       if (sidebar.value.mediaId === id) sidebar.value.playbackLoading = false
     }
@@ -97,34 +110,24 @@ export function useAnalysisWorkspace({
 
   const refreshAgentMeta = async (id, goal, includeEvaluation) => {
     const params = new URLSearchParams({ id: String(id), goal })
-    try {
-      const requests = [
-        apiRequest(`/analysis/agent-plan?${params}`),
-        apiRequest(`/analysis/agent-trace?${params}`)
-      ]
-      if (includeEvaluation) requests.push(apiRequest(`/analysis/agent-evaluation?${params}`))
+    const requests = [
+      apiRequest(`/analysis/agent-plan?${params}`),
+      apiRequest(`/analysis/agent-trace?${params}`)
+    ]
+    if (includeEvaluation) requests.push(apiRequest(`/analysis/agent-evaluation?${params}`))
 
-      const responses = await Promise.all(requests)
-      if (sidebar.value.mediaId !== id || sidebar.value.goal !== goal) return
-
-      const planText = responses[0].ok ? await responses[0].text() : ''
-      const traceText = responses[1].ok ? await responses[1].text() : ''
-      if (planText && !sidebar.value.editingPlan) sidebar.value.plan = JSON.parse(planText)
-      if (traceText) sidebar.value.trace = JSON.parse(traceText)
-      if (includeEvaluation && responses[2]?.ok) {
-        const evaluationText = await responses[2].text()
-        if (evaluationText) sidebar.value.evaluation = JSON.parse(evaluationText)
-      }
-    } catch (error) {
-      console.warn('Agent metadata unavailable', error)
-    }
+    const settled = await Promise.allSettled(requests)
+    if (sidebar.value.mediaId !== id || sidebar.value.goal !== goal) return
+    const [plan, trace, evaluation] = await Promise.all(settled.map(readSettledJson))
+    if (plan && !sidebar.value.editingPlan) sidebar.value.plan = plan
+    if (trace) sidebar.value.trace = trace
+    if (includeEvaluation && evaluation) sidebar.value.evaluation = evaluation
   }
 
   const startTaskStream = (id, type, goal = '') => {
     const scope = type === 'ai' ? goal : ''
-    const isCurrentTask = () => sidebar.value.mediaId === id
-      && sidebar.value.type === type
-      && (type !== 'ai' || sidebar.value.goal === goal)
+    const isCurrentTask = () => isCurrentWorkspace(
+      id, type, type === 'ai' ? goal : null)
     const finish = async (result, failed = false) => {
       if (sidebar.value.visible && isCurrentTask()) {
         sidebar.value.content = failed && type === 'ai' ? '' : result
@@ -186,8 +189,10 @@ export function useAnalysisWorkspace({
       if (!current.ok) throw new Error(await current.text())
       const currentStatus = await current.json()
       if (currentStatus.state === 'COMPLETED') {
-        sidebar.value.content = currentStatus.result || ''
-        sidebar.value.loading = false
+        if (isCurrentWorkspace(id, 'text')) {
+          sidebar.value.content = currentStatus.result || ''
+          sidebar.value.loading = false
+        }
         return
       }
       if (currentStatus.state === 'QUEUED' || currentStatus.state === 'PROCESSING') {
@@ -198,8 +203,10 @@ export function useAnalysisWorkspace({
       if (!response.ok) throw new Error(await response.text())
       startTaskStream(id, 'text')
     } catch (error) {
-      sidebar.value.content = error.message || '文字提取失败，请稍后重试'
-      sidebar.value.loading = false
+      if (isCurrentWorkspace(id, 'text')) {
+        sidebar.value.content = error.message || '文字提取失败，请稍后重试'
+        sidebar.value.loading = false
+      }
     }
   }
 
@@ -223,18 +230,22 @@ export function useAnalysisWorkspace({
         return
       }
       if (!response.ok) {
-        showMessage(message, true)
-        sidebar.value.loading = false
-        sidebar.value.mode = 'compose'
-        sidebar.value.error = message
+        if (isCurrentWorkspace(id, 'ai', goal)) {
+          showMessage(message, true)
+          sidebar.value.loading = false
+          sidebar.value.mode = 'compose'
+          sidebar.value.error = message
+        }
         return
       }
       startTaskStream(id, 'ai', goal)
       refreshAgentMeta(id, goal, false)
     } catch (error) {
-      sidebar.value.mode = 'compose'
-      sidebar.value.error = error.message || String(error)
-      sidebar.value.loading = false
+      if (isCurrentWorkspace(id, 'ai', goal)) {
+        sidebar.value.mode = 'compose'
+        sidebar.value.error = error.message || String(error)
+        sidebar.value.loading = false
+      }
     }
   }
 
@@ -253,7 +264,10 @@ export function useAnalysisWorkspace({
     try {
       const params = new URLSearchParams({ id: String(item.id), goal })
       const response = await apiRequest(`/analysis/analysis-status?${params}`)
-      if (!response.ok) return
+      if (!response.ok) {
+        const detail = await response.text()
+        throw new Error(detail || '历史分析状态加载失败')
+      }
       const status = await response.json()
       if (sidebar.value.mediaId !== item.id || sidebar.value.goal !== goal) return
 
@@ -273,6 +287,9 @@ export function useAnalysisWorkspace({
       }
     } catch (error) {
       console.warn('Previous analysis unavailable', error)
+      if (sidebar.value.mediaId === item.id && sidebar.value.goal === goal) {
+        sidebar.value.error = error.message || '历史分析状态加载失败，可以重新提交'
+      }
     }
   }
 
@@ -339,29 +356,35 @@ export function useAnalysisWorkspace({
       return
     }
 
+    const mediaId = sidebar.value.mediaId
+    const goal = sidebar.value.goal
     sidebar.value.rerunLoading = true
     try {
       const response = await apiRequest('/analysis/agent-revise', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          mediaId: sidebar.value.mediaId,
-          goal: sidebar.value.goal,
+          mediaId,
+          goal,
           correctedTasks: tasks,
           comment: '用户调整 Planner 任务后重新执行'
         })
       })
       const message = await response.text()
       if (!response.ok) throw new Error(message || '重新提交失败')
-      sidebar.value.plan = { ...sidebar.value.plan, tasks }
-      cancelPlanEdit()
-      sidebar.value.content = ''
-      sidebar.value.loading = true
-      startTaskStream(sidebar.value.mediaId, 'ai', sidebar.value.goal)
+      if (isCurrentWorkspace(mediaId, 'ai', goal)) {
+        sidebar.value.plan = { ...sidebar.value.plan, tasks }
+        cancelPlanEdit()
+        sidebar.value.content = ''
+        sidebar.value.loading = true
+      }
+      startTaskStream(mediaId, 'ai', goal)
     } catch (error) {
-      showMessage(error.message || '重新提交失败', true)
+      if (isCurrentWorkspace(mediaId, 'ai', goal)) {
+        showMessage(error.message || '重新提交失败', true)
+      }
     } finally {
-      sidebar.value.rerunLoading = false
+      if (isCurrentWorkspace(mediaId, 'ai', goal)) sidebar.value.rerunLoading = false
     }
   }
 
@@ -374,39 +397,85 @@ export function useAnalysisWorkspace({
       return
     }
 
+    const mediaId = sidebar.value.mediaId
+    const goal = sidebar.value.goal
     sidebar.value.followUpLoading = true
     try {
-      const params = new URLSearchParams({ id: String(sidebar.value.mediaId), question })
+      const params = new URLSearchParams({
+        id: String(mediaId),
+        question,
+        goal
+      })
       const response = await apiRequest(`/analysis/follow-up?${params}`, { method: 'POST' })
       const answer = await response.text()
       if (!response.ok) throw new Error(answer || '追问失败')
-      sidebar.value.content += `\n\n## 追问\n${question}\n\n${answer}`
-      sidebar.value.followUp = ''
+      if (isCurrentWorkspace(mediaId, 'ai', goal)) {
+        sidebar.value.content += `\n\n## 追问\n${question}\n\n${answer}`
+        sidebar.value.followUp = ''
+      }
     } catch (error) {
-      showMessage(`❌ ${error.message}`, true)
+      if (isCurrentWorkspace(mediaId, 'ai', goal)) {
+        showMessage(`❌ ${error.message}`, true)
+      }
     } finally {
-      sidebar.value.followUpLoading = false
+      if (isCurrentWorkspace(mediaId, 'ai', goal)) sidebar.value.followUpLoading = false
     }
   }
 
   const sendFeedback = async rating => {
+    if (sidebar.value.feedbackLoading || sidebar.value.feedback === rating) return
     if (demoMode) {
       sidebar.value.feedback = rating
       showMessage('演示反馈已记录')
       return
     }
+    const mediaId = sidebar.value.mediaId
+    const goal = sidebar.value.goal
+    sidebar.value.feedbackLoading = true
     try {
       const response = await apiRequest('/analysis/agent-feedback', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ mediaId: sidebar.value.mediaId, goal: sidebar.value.goal, rating })
+        body: JSON.stringify({ mediaId, goal, rating })
       })
       if (!response.ok) throw new Error(await response.text())
-      sidebar.value.feedback = rating
-      showMessage('反馈已记录')
+      if (isCurrentWorkspace(mediaId, 'ai', goal)) {
+        sidebar.value.feedback = rating
+        showMessage('反馈已记录')
+      }
     } catch (error) {
-      showMessage(`❌ ${error.message}`, true)
+      if (isCurrentWorkspace(mediaId, 'ai', goal)) {
+        showMessage(`❌ ${error.message}`, true)
+      }
+    } finally {
+      if (isCurrentWorkspace(mediaId, 'ai', goal)) sidebar.value.feedbackLoading = false
     }
+  }
+
+  const retryPlayback = () => {
+    if (sidebar.value.mediaId && !sidebar.value.playbackLoading) {
+      loadPlayback(sidebar.value.mediaId)
+    }
+  }
+
+  const handlePlaybackError = () => {
+    if (!sidebar.value.playbackUrl) return
+    sidebar.value.playbackUrl = ''
+    sidebar.value.playbackError = '播放地址可能已失效，请重新加载'
+  }
+
+  const resetWorkspace = () => {
+    sidebar.value = createSidebarState()
+  }
+
+  const discardMediaWorkspace = mediaId => {
+    taskStreams.stopMedia(mediaId)
+    try {
+      localStorage.removeItem(goalDraftKey(mediaId))
+    } catch {
+      // Storage being unavailable should not block media deletion.
+    }
+    if (sidebar.value.mediaId === mediaId) resetWorkspace()
   }
 
   return {
@@ -427,7 +496,21 @@ export function useAnalysisWorkspace({
     rerunWithPlan,
     submitFollowUp,
     sendFeedback,
+    retryPlayback,
+    handlePlaybackError,
+    resetWorkspace,
+    discardMediaWorkspace,
     formatPercent: value => `${Math.round((Number(value) || 0) * 100)}%`
+  }
+}
+
+async function readSettledJson(result) {
+  if (result.status !== 'fulfilled' || !result.value.ok) return null
+  try {
+    return await result.value.json()
+  } catch (error) {
+    console.warn('Agent metadata response is invalid', error)
+    return null
   }
 }
 

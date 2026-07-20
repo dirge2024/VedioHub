@@ -150,15 +150,15 @@
                 <div class="filename-mask" :title="item.filename">{{ item.filename }}</div>
                 <div class="meta-tags">
                   <span class="time-tag">{{ formatTime(item.uploadTime) }}</span>
-                  <span class="status-indicator" :class="item.status.toLowerCase()">
-                    {{ item.status === 'COMPLETED' ? 'READY' : 'PROCESSING' }}
+                  <span class="status-indicator" :class="mediaStatusClass(item.status)">
+                    {{ mediaStatusLabel(item.status) }}
                   </span>
                 </div>
               </div>
             </div>
 
             <div class="action-dock">
-              <button class="dock-item" @click="downloadAudio(item)">
+              <button class="dock-item" :disabled="item.status !== 'COMPLETED'" @click="downloadAudio(item)">
                 <span class="item-icon">
                   <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"></path><circle cx="6" cy="18" r="3"></circle><circle cx="18" cy="16" r="3"></circle></svg>
                 </span>
@@ -227,8 +227,13 @@
                 :src="sidebar.playbackUrl"
                 controls
                 preload="metadata"
+                @error="handlePlaybackError"
             ></video>
             <div v-else-if="sidebar.playbackLoading" class="video-evidence-loading">正在载入原视频...</div>
+            <div v-else-if="sidebar.playbackError" class="video-evidence-error" role="alert">
+              <span>{{ sidebar.playbackError }}</span>
+              <button type="button" @click="retryPlayback">重新加载</button>
+            </div>
             <p v-if="sidebar.playbackUrl">点击分析结果中的时间戳，可跳转到对应画面</p>
           </div>
           <div v-if="sidebar.type === 'ai' && sidebar.mode === 'compose'" class="agent-composer">
@@ -313,8 +318,8 @@
               </div>
               <div class="feedback-row">
                 <span>这个结果有帮助吗？</span>
-                <button :class="{ active: sidebar.feedback === 1 }" :aria-pressed="sidebar.feedback === 1" @click="sendFeedback(1)" title="有帮助">赞</button>
-                <button :class="{ active: sidebar.feedback === -1 }" :aria-pressed="sidebar.feedback === -1" @click="sendFeedback(-1)" title="需改进">踩</button>
+                <button :disabled="sidebar.feedbackLoading" :class="{ active: sidebar.feedback === 1 }" :aria-pressed="sidebar.feedback === 1" @click="sendFeedback(1)" title="有帮助">赞</button>
+                <button :disabled="sidebar.feedbackLoading" :class="{ active: sidebar.feedback === -1 }" :aria-pressed="sidebar.feedback === -1" @click="sendFeedback(-1)" title="需改进">踩</button>
               </div>
             </div>
             <div v-else class="text-content"><pre>{{ sidebar.content }}</pre></div>
@@ -392,6 +397,7 @@ const authMessage = ref('')
 const authError = ref(false)
 const authForm = ref({ username: '', password: '', nickname: '' })
 const taskStreams = createTaskStreams()
+const VIDEO_EXTENSIONS = new Set(['mp4', 'mov', 'mkv', 'avi', 'webm', 'm4v'])
 
 // --- 核心业务逻辑 ---
 
@@ -404,7 +410,7 @@ const handleFileChange = async (e) => {
   }
   const selectedFile = e.target.files[0]
   if (!selectedFile) return
-  if (!selectedFile.type.startsWith('video/')) {
+  if (!isSupportedVideo(selectedFile)) {
     e.target.value = ''
     showMsg('⚠️ 仅支持上传视频文件', true)
     return
@@ -425,7 +431,7 @@ const handleDrop = async (e) => {
   const droppedFiles = e.dataTransfer.files
   if (!droppedFiles || droppedFiles.length === 0) return
   const selectedFile = droppedFiles[0]
-  if (!selectedFile.type.startsWith('video/')) {
+  if (!isSupportedVideo(selectedFile)) {
     showMsg('⚠️ 仅支持上传视频文件', true)
     return
   }
@@ -441,10 +447,11 @@ const uploadFile = async () => {
     return
   }
   uploading.value = true
+  const uploadUserId = currentUser.value?.id
   uploadProgress.value = { label: '准备分片上传', filename: file.value.name, percent: 0 }
 
   try {
-    await uploadVideoInChunks(file.value, progress => {
+    const uploadedMedia = await uploadVideoInChunks(file.value, progress => {
       const percent = progress.phase === 'merging'
         ? 100
         : Math.round(progress.completedChunks / progress.totalChunks * 100)
@@ -458,11 +465,13 @@ const uploadFile = async () => {
         ? '分片上传完成，正在合并文件...'
         : `正在上传分片 ${progress.completedChunks}/${progress.totalChunks}...`
     })
+    if (currentUser.value?.id !== uploadUserId) return
     showMsg('✅ 本地上传完成')
-    await fetchList()
-    if (list.value[0]) openAgent(list.value[0])
+    await fetchList({ notify: true })
+    openAgent(uploadedMedia)
   } catch (error) {
     console.error(error)
+    if (currentUser.value?.id !== uploadUserId) return
     showMsg('❌ 上传失败: ' + error.message, true)
   } finally {
     uploading.value = false
@@ -471,7 +480,8 @@ const uploadFile = async () => {
 }
 
 const handleUrlUpload = async () => {
-  if (!videoUrl.value) return
+  const normalizedUrl = videoUrl.value.trim()
+  if (!normalizedUrl) return
   if (DEMO_MODE) {
     videoUrl.value = ''
     showMsg('演示模式：已模拟完成链接解析')
@@ -486,7 +496,7 @@ const handleUrlUpload = async () => {
 
   let parsedUrl
   try {
-    parsedUrl = new URL(videoUrl.value)
+    parsedUrl = new URL(normalizedUrl)
   } catch {
     parsedUrl = null
   }
@@ -496,27 +506,30 @@ const handleUrlUpload = async () => {
   }
 
   uploading.value = true
+  const uploadUserId = currentUser.value?.id
   uploadProgress.value = { label: '正在解析视频链接', filename: parsedUrl.hostname, percent: null }
   messageIsError.value = false
   message.value = '正在解析链接并极速下载 (低码率模式)...'
 
   const formData = new FormData()
-  formData.append('url', videoUrl.value)
+  formData.append('url', normalizedUrl)
 
   try {
     const res = await apiRequest('/media/upload-url', {
       method: 'POST',
       body: formData
     })
-    const text = await res.text()
-    if (!res.ok) throw new Error(text)
+    if (!res.ok) throw new Error(await res.text())
+    const uploadedMedia = await res.json()
+    if (currentUser.value?.id !== uploadUserId) return
 
     showMsg('✅ 链接资源已入库')
     videoUrl.value = ''
-    await fetchList()
-    if (list.value[0]) openAgent(list.value[0])
+    await fetchList({ notify: true })
+    openAgent(uploadedMedia)
   } catch (error) {
     console.error(error)
+    if (currentUser.value?.id !== uploadUserId) return
     let errMsg = error.message
     if (errMsg.includes("Unsupported URL")) errMsg = "不支持该平台链接"
     showMsg('❌ 解析失败: ' + errMsg, true)
@@ -536,7 +549,7 @@ const showMsg = (msg, isError = false) => {
   }, 4000)
 }
 
-const fetchList = async () => {
+const fetchList = async ({ notify = false } = {}) => {
   if (DEMO_MODE) return list.value
   try {
     let url = '/media/list'
@@ -545,6 +558,7 @@ const fetchList = async () => {
       url += `?_t=${timestamp}`
 
       const res = await apiRequest(url)
+      if (res.status === 401) return null
       if (!res.ok) throw new Error('加载视频列表失败')
       const data = await res.json()
       list.value = data
@@ -553,9 +567,26 @@ const fetchList = async () => {
     }
   } catch (error) {
     console.error(error)
+    if (notify) showMsg('视频资料库加载失败，请稍后刷新', true)
+    return null
   }
   return list.value
 }
+
+const isSupportedVideo = selectedFile => {
+  if (selectedFile.type?.startsWith('video/')) return true
+  const extension = selectedFile.name?.split('.').pop()?.toLowerCase()
+  return VIDEO_EXTENSIONS.has(extension)
+}
+
+const mediaStatusClass = status => ['COMPLETED', 'PROCESSING', 'FAILED'].includes(status)
+  ? status.toLowerCase()
+  : 'unknown'
+const mediaStatusLabel = status => ({
+  COMPLETED: 'READY',
+  PROCESSING: 'PROCESSING',
+  FAILED: 'FAILED'
+})[status] || 'PENDING'
 
 const {
   sidebar,
@@ -575,6 +606,10 @@ const {
   rerunWithPlan,
   submitFollowUp,
   sendFeedback,
+  retryPlayback,
+  handlePlaybackError,
+  resetWorkspace,
+  discardMediaWorkspace,
   formatPercent
 } = useAnalysisWorkspace({
   demoMode: DEMO_MODE,
@@ -590,7 +625,9 @@ const seekEvidence = event => {
   event.preventDefault()
   const seconds = Number(link.getAttribute('href').split('=')[1])
   if (!Number.isFinite(seconds)) return
-  videoPlayer.value.currentTime = seconds
+  const duration = videoPlayer.value.duration
+  const maxTime = Number.isFinite(duration) ? Math.max(0, duration - 0.1) : Number.MAX_SAFE_INTEGER
+  videoPlayer.value.currentTime = Math.min(Math.max(0, seconds), maxTime)
   videoPlayer.value.play().catch(() => {})
 }
 
@@ -616,6 +653,7 @@ const downloadResult = () => {
 const deleteItem = async (item) => {
   if (DEMO_MODE) {
     list.value = list.value.filter(i => i.id !== item.id)
+    discardMediaWorkspace(item.id)
     showMsg('演示任务已移除')
     return
   }
@@ -623,9 +661,10 @@ const deleteItem = async (item) => {
   try {
     const res = await apiRequest(`/media/delete?id=${item.id}`, { method: 'DELETE' })
     const text = await res.text()
-    if (text === '删除成功') {
+    if (res.ok) {
       showMsg('文件已销毁')
       list.value = list.value.filter(i => i.id !== item.id)
+      discardMediaWorkspace(item.id)
     } else {
       showMsg('❌ ' + text, true)
     }
@@ -637,6 +676,7 @@ const deleteItem = async (item) => {
 const formatTime = (timeStr) => {
   if (!timeStr) return '--'
   const date = new Date(timeStr)
+  if (Number.isNaN(date.getTime())) return '--'
   return `${date.getMonth() + 1}/${date.getDate()} ${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`
 }
 
@@ -706,7 +746,7 @@ const handleAuth = async () => {
         setAuthToken(data.token)
         closeAuthModal()
         showMsg(`欢迎回来，${data.userInfo.nickname}`)
-        fetchList()
+        fetchList({ notify: true })
       } else {
         authMessage.value = '注册成功，请直接登录'
         authError.value = false
@@ -729,18 +769,27 @@ const logout = () => {
     apiRequest('/user/logout', { method: 'POST' }).catch(() => {})
   }
   taskStreams.stopAll()
+  resetWorkspace()
   currentUser.value = null
   localStorage.removeItem('user')
   clearAuthToken()
   list.value = []
+  searchQuery.value = ''
+  videoUrl.value = ''
+  file.value = null
+  uploading.value = false
   showMsg('已退出系统')
 }
 
 const handleAuthExpired = () => {
   taskStreams.stopAll()
+  resetWorkspace()
   currentUser.value = null
   list.value = []
-  sidebar.value.visible = false
+  searchQuery.value = ''
+  videoUrl.value = ''
+  file.value = null
+  uploading.value = false
   localStorage.removeItem('user')
   showMsg('登录状态已失效，请重新登录', true)
   openAuthModal()
@@ -762,7 +811,7 @@ onMounted(() => {
       currentUser.value = JSON.parse(savedUser)
     } catch(e) {}
   }
-  fetchList()
+  fetchList({ notify: Boolean(currentUser.value) })
 })
 onUnmounted(() => {
   window.removeEventListener('auth-expired', handleAuthExpired)
@@ -942,6 +991,8 @@ html, body, #app {
 .status-indicator { font-weight: 600; padding: 2px 8px; border-radius: 4px; }
 .status-indicator.completed { color: var(--accent-lime); border: 1px solid var(--accent-lime); background: rgba(197, 249, 70, 0.1); }
 .status-indicator.processing { color: var(--accent-purple); border: 1px solid var(--accent-purple); animation: blink 1s infinite; }
+.status-indicator.failed { color: #ff7c88; border: 1px solid #ff4757; background: rgba(255, 71, 87, 0.08); }
+.status-indicator.unknown { color: var(--text-sub); border: 1px solid var(--border-tech); }
 
 .action-dock { display: grid; grid-template-columns: 1fr 1fr 1.5fr; gap: 12px; padding: 12px; background: rgba(5, 8, 5, 0.5); }
 .dock-item { position: relative; border: 1px solid var(--border-tech); background: var(--bg-card); border-radius: 8px; padding: 16px; display: flex; align-items: center; justify-content: center; gap: 10px; cursor: pointer; transition: all 0.3s; color: var(--text-sub); font-family: monospace; overflow: hidden; }
@@ -983,6 +1034,8 @@ html, body, #app {
 .video-evidence video { display: block; width: 100%; max-height: 420px; aspect-ratio: 16 / 9; background: #000; object-fit: contain; }
 .video-evidence p, .video-evidence-loading { padding: 10px 30px; color: var(--text-sub); font-size: 0.8rem; }
 .video-evidence-loading { min-height: 110px; display: grid; place-items: center; }
+.video-evidence-error { min-height: 110px; padding: 18px 30px; display: flex; align-items: center; justify-content: center; gap: 12px; color: #ff9aa4; }
+.video-evidence-error button { border: 1px solid #ff4757; background: transparent; color: #ff9aa4; padding: 6px 10px; border-radius: 4px; cursor: pointer; }
 .agent-composer { display: flex; flex-direction: column; gap: 18px; }
 .agent-caption { color: var(--text-sub); line-height: 1.7; }
 .inline-error { padding: 11px 12px; border-left: 2px solid #ff4757; background: rgba(255, 71, 87, 0.08); color: #ff9aa4; line-height: 1.5; }

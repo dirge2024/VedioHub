@@ -81,12 +81,12 @@ public class MediaController {
     }
 
     @PostMapping("/complete-upload")
-    public ResponseEntity<String> completeUpload(
+    public ResponseEntity<?> completeUpload(
             @RequestParam String uploadId,
             @RequestAttribute(AuthService.REQUEST_USER_ID) Long userId) {
         try {
-            chunkUploadService.complete(uploadId, userId);
-            return ResponseEntity.ok("Upload success");
+            MediaFile mediaFile = chunkUploadService.complete(uploadId, userId);
+            return ResponseEntity.ok(MediaSummary.from(mediaFile));
         } catch (SecurityException e) {
             return ResponseEntity.status(HttpStatus.FORBIDDEN).body(e.getMessage());
         } catch (IllegalArgumentException | IllegalStateException e) {
@@ -98,11 +98,11 @@ public class MediaController {
     }
 
     @PostMapping("/upload")
-    public ResponseEntity<String> upload(@RequestParam("file") MultipartFile file,
-                                         @RequestAttribute(AuthService.REQUEST_USER_ID) Long userId) {
+    public ResponseEntity<?> upload(@RequestParam("file") MultipartFile file,
+                                    @RequestAttribute(AuthService.REQUEST_USER_ID) Long userId) {
         try {
-            mediaIngestService.ingestFile(file, userId);
-            return ResponseEntity.ok("Upload success");
+            MediaFile mediaFile = mediaIngestService.ingestFile(file, userId);
+            return ResponseEntity.ok(MediaSummary.from(mediaFile));
         } catch (IllegalArgumentException e) {
             return ResponseEntity.badRequest().body(e.getMessage());
         } catch (Exception e) {
@@ -112,11 +112,11 @@ public class MediaController {
     }
 
     @PostMapping("/upload-url")
-    public ResponseEntity<String> uploadUrl(@RequestParam("url") String url,
-                                            @RequestAttribute(AuthService.REQUEST_USER_ID) Long userId) {
+    public ResponseEntity<?> uploadUrl(@RequestParam("url") String url,
+                                       @RequestAttribute(AuthService.REQUEST_USER_ID) Long userId) {
         try {
-            mediaIngestService.ingestUrl(url, userId);
-            return ResponseEntity.ok("Upload success");
+            MediaFile mediaFile = mediaIngestService.ingestUrl(url, userId);
+            return ResponseEntity.ok(MediaSummary.from(mediaFile));
         } catch (IllegalArgumentException e) {
             return ResponseEntity.badRequest().body(e.getMessage());
         } catch (Exception e) {

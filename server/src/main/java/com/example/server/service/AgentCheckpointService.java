@@ -68,6 +68,12 @@ public class AgentCheckpointService {
                 mediaId, goalCheckpoint(goal, "stage"), goalKey(mediaId, goal));
     }
 
+    public void saveStage(Long mediaId, String goal, TaskStage stage) {
+        String key = goalKey(mediaId, goal);
+        checkpointRepository.writeStage(mediaId, goalCheckpoint(goal, "stage"), key, stage);
+        rememberGoalKey(mediaId, key);
+    }
+
     public List<VideoChunk> loadChunks(Long mediaId) {
         return checkpointRepository.read(
                 mediaId,
@@ -110,6 +116,15 @@ public class AgentCheckpointService {
         String key = goalKey(mediaId, state.goal());
         checkpointRepository.write(mediaId, goalCheckpoint(state.goal(), "criticState"), goalCheckpoint(state.goal(), "stage"),
                 key, "criticState", stage, state);
+        rememberGoalKey(mediaId, key);
+    }
+
+    public void saveExecutionState(Long mediaId, AgentState state) {
+        String key = goalKey(mediaId, state.goal());
+        checkpointRepository.write(mediaId,
+                goalCheckpoint(state.goal(), "criticState"),
+                goalCheckpoint(state.goal(), "stage"),
+                key, "criticState", TaskStage.EXECUTOR_COMPLETED, state);
         rememberGoalKey(mediaId, key);
     }
 

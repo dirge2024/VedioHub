@@ -120,14 +120,18 @@ public class AiService {
         }
     }
 
-    public String followUp(Long mediaId, String question) {
+    public String followUp(Long mediaId, String originalGoal, String question) {
         VideoContext context = checkpointService.loadContext(mediaId);
         if (context == null) throw new IllegalStateException("视频尚未完成 VideoContext 构建");
 
         String traceId = telemetry.start(mediaId, question);
         telemetry.bind(traceId);
         try {
-            VideoContext followUpContext = new VideoContext(context.source(), question, context.segments());
+            AgentState previous = originalGoal == null
+                    ? null : checkpointService.loadResult(mediaId, originalGoal);
+            String followUpGoal = contextualQuestion(originalGoal, previous, question);
+            VideoContext followUpContext = new VideoContext(
+                    context.source(), followUpGoal, context.segments());
             return agentLoopService.run(mediaId, followUpContext).result().toMarkdown();
         } finally {
             telemetry.flush(traceId);
@@ -183,6 +187,18 @@ public class AiService {
                                 ? java.util.List.of()
                                 : java.util.List.of(targetSource + "#timestampMs=" + segment.startMs())))
                 .toList());
+    }
+
+    private String contextualQuestion(String originalGoal, AgentState previous, String question) {
+        if (originalGoal == null || previous == null || previous.result() == null) return question;
+        String previousResult = previous.result().toMarkdown();
+        if (previousResult.length() > 4_000) previousResult = previousResult.substring(0, 4_000);
+        return """
+                这是对同一视频的继续追问。请结合原始视频证据和已有分析回答当前问题。
+                原始目标：%s
+                已有分析：%s
+                当前追问：%s
+                """.formatted(originalGoal, previousResult, question);
     }
 
     private void persistResult(MediaFile mediaFile, AgentState agentState) {

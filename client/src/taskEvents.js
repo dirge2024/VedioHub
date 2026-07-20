@@ -15,11 +15,20 @@ export function createTaskStreams() {
     streams.clear()
   }
 
+  const stopMedia = id => {
+    for (const [key, controller] of streams.entries()) {
+      if (key.split(':', 2)[1] !== String(id)) continue
+      controller.abort()
+      streams.delete(key)
+    }
+  }
+
   const start = (id, type, scope, path, onEvent, onError) => {
     stop(id, type, scope)
     const key = keyOf(id, type, scope)
     const controller = new AbortController()
     streams.set(key, controller)
+    let reconnectAttempt = 0
 
     const run = async () => {
       while (!controller.signal.aborted && streams.get(key) === controller) {
@@ -29,7 +38,10 @@ export function createTaskStreams() {
             signal: controller.signal
           })
           if (!response.ok || !response.body) throw new Error(await response.text())
-          const terminal = await consumeStream(response.body, onEvent, controller.signal)
+          const terminal = await consumeStream(response.body, async event => {
+            reconnectAttempt = 0
+            await onEvent(event)
+          }, controller.signal)
           if (terminal) {
             streams.delete(key)
             return
@@ -38,8 +50,8 @@ export function createTaskStreams() {
           if (controller.signal.aborted) return
           onError?.(error)
         }
-        // SSE 断线只重连事件流，不再定时请求任务状态。
-        await new Promise(resolve => setTimeout(resolve, 1500))
+        const delay = Math.min(15_000, 1_000 * 2 ** reconnectAttempt++)
+        await waitForRetry(delay, controller.signal)
       }
     }
 
@@ -52,8 +64,23 @@ export function createTaskStreams() {
     has: (id, type, scope = '') => streams.has(keyOf(id, type, scope)),
     start,
     stop,
+    stopMedia,
     stopAll
   }
+}
+
+function waitForRetry(delay, signal) {
+  if (signal.aborted) return Promise.resolve()
+  return new Promise(resolve => {
+    const timer = setTimeout(finish, delay)
+    signal.addEventListener('abort', finish, { once: true })
+
+    function finish() {
+      clearTimeout(timer)
+      signal.removeEventListener('abort', finish)
+      resolve()
+    }
+  })
 }
 
 async function consumeStream(body, onEvent, signal) {

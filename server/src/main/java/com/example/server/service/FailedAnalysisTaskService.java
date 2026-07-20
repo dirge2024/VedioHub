@@ -18,6 +18,7 @@ import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.NoSuchElementException;
+import java.util.regex.Pattern;
 
 @Service
 public class FailedAnalysisTaskService {
@@ -26,6 +27,12 @@ public class FailedAnalysisTaskService {
     private static final Duration ACTIVE_TTL = Duration.ofHours(6);
     private static final String STATUS_FAILED = "FAILED";
     private static final String STATUS_REQUEUED = "REQUEUED";
+    private static final Pattern BEARER_SECRET = Pattern.compile(
+            "(?i)(bearer\\s+)[A-Za-z0-9._~+/=-]{8,}");
+    private static final Pattern NAMED_SECRET = Pattern.compile(
+            "(?i)((?:api[-_ ]?key|token|secret)\\s*[=:]\\s*)[^\\s,;]{8,}");
+    private static final Pattern PREFIXED_SECRET = Pattern.compile(
+            "(?i)sk-[A-Za-z0-9_-]{16,}");
 
     private final FailedAnalysisTaskMapper taskMapper;
     private final RocketMQTemplate rocketMQTemplate;
@@ -55,7 +62,7 @@ public class FailedAnalysisTaskService {
         task.setUserGoal(message.getUserGoal());
         task.setAttemptCount((int) attempts);
         task.setErrorType(root.getClass().getSimpleName());
-        task.setErrorMessage(truncate(root.getMessage(), 1_000));
+        task.setErrorMessage(sanitizeError(root.getMessage()));
         task.setStatus(STATUS_FAILED);
         task.setCreatedAt(LocalDateTime.now());
         task.setUpdatedAt(LocalDateTime.now());
@@ -125,5 +132,13 @@ public class FailedAnalysisTaskService {
     private String truncate(String value, int maxLength) {
         if (value == null || value.length() <= maxLength) return value;
         return value.substring(0, maxLength);
+    }
+
+    private String sanitizeError(String value) {
+        if (value == null) return null;
+        String sanitized = BEARER_SECRET.matcher(value).replaceAll("$1****");
+        sanitized = NAMED_SECRET.matcher(sanitized).replaceAll("$1****");
+        sanitized = PREFIXED_SECRET.matcher(sanitized).replaceAll("****");
+        return truncate(sanitized, 1_000);
     }
 }

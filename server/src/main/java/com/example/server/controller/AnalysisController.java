@@ -78,10 +78,13 @@ public class AnalysisController {
     public ResponseEntity<String> followUp(
             @RequestParam Long id,
             @RequestParam String question,
+            @RequestParam(required = false) String goal,
             @RequestAttribute(AuthService.REQUEST_USER_ID) Long userId) {
         String normalizedQuestion = normalizeText(question, "追问内容");
+        String normalizedGoal = goal == null || goal.isBlank()
+                ? null : normalizeText(goal, "原始分析目标");
         mediaService.requireOwnedMedia(id, userId);
-        return ResponseEntity.ok(aiService.followUp(id, normalizedQuestion));
+        return ResponseEntity.ok(aiService.followUp(id, normalizedGoal, normalizedQuestion));
     }
 
     @PostMapping("/agent-feedback")

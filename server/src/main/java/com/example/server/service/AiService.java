@@ -86,6 +86,9 @@ public class AiService {
                         traceId, mediaId, checkpointError);
             }
             log.error("agent_analysis_failed traceId={} mediaId={}", traceId, mediaId, e);
+            if (e instanceof AgentLoopService.BudgetExceededException budgetExceeded) {
+                throw budgetExceeded;
+            }
             throw new IllegalStateException("AI analysis failed", e);
         } finally {
             telemetry.flush(traceId);

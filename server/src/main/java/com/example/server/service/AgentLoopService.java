@@ -8,6 +8,7 @@ import com.example.server.dto.VideoContext;
 import com.example.server.utils.DeepSeekUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
@@ -18,7 +19,6 @@ import java.util.List;
 public class AgentLoopService {
 
     private static final Logger log = LoggerFactory.getLogger(AgentLoopService.class);
-    private static final int MAX_ROUNDS = 2;
     private static final int MAX_PLAN_TASKS = 5;
 
     private final DeepSeekUtils deepSeekUtils;
@@ -27,19 +27,34 @@ public class AgentLoopService {
     private final AgentTelemetry telemetry;
     private final EvidenceVerificationService evidenceVerificationService;
     private final TaskEventService taskEventService;
+    private final int maxRounds;
+    private final long maxDurationMs;
+    private final long maxEstimatedTokens;
+    private final double maxEstimatedCost;
 
     public AgentLoopService(DeepSeekUtils deepSeekUtils,
                             LongVideoContextService longVideoContextService,
                             AgentCheckpointService checkpointService,
                             AgentTelemetry telemetry,
                             EvidenceVerificationService evidenceVerificationService,
-                            TaskEventService taskEventService) {
+                            TaskEventService taskEventService,
+                            @Value("${agent.budget.max-rounds:2}") int maxRounds,
+                            @Value("${agent.budget.max-duration-ms:120000}") long maxDurationMs,
+                            @Value("${agent.budget.max-estimated-tokens:50000}") long maxEstimatedTokens,
+                            @Value("${agent.budget.max-estimated-cost:1}") double maxEstimatedCost) {
         this.deepSeekUtils = deepSeekUtils;
         this.longVideoContextService = longVideoContextService;
         this.checkpointService = checkpointService;
         this.telemetry = telemetry;
         this.evidenceVerificationService = evidenceVerificationService;
         this.taskEventService = taskEventService;
+        if (maxRounds < 1 || maxDurationMs < 1 || maxEstimatedTokens < 1 || maxEstimatedCost < 0) {
+            throw new IllegalArgumentException("Agent 终止预算配置无效");
+        }
+        this.maxRounds = maxRounds;
+        this.maxDurationMs = maxDurationMs;
+        this.maxEstimatedTokens = maxEstimatedTokens;
+        this.maxEstimatedCost = maxEstimatedCost;
     }
 
     public AgentState run(VideoContext context) {
@@ -48,11 +63,12 @@ public class AgentLoopService {
 
     public AgentState run(Long mediaId, VideoContext context) {
         validateContext(context);
+        long runStartedNanos = System.nanoTime();
         AgentState savedState = mediaId == null ? null
                 : checkpointService.loadCriticState(mediaId, context.userGoal());
         boolean terminalCheckpoint = savedState != null && savedState.result() != null
                 && savedState.critique() != null
-                && (savedState.round() >= MAX_ROUNDS || savedState.critique().passed());
+                && (savedState.round() >= maxRounds || savedState.critique().passed());
         if (terminalCheckpoint && isPlanValid(savedState.plan()) && isResultValid(savedState.result())) {
             checkpointService.saveResult(mediaId, savedState);
             telemetry.incrementCurrent("terminalCheckpointHits", 1);
@@ -66,6 +82,7 @@ public class AgentLoopService {
 
         VideoContext relevantContext = longVideoContextService.selectRelevant(mediaId, context);
         AgentState.AgentPlan plan = resolvePlan(mediaId, relevantContext, savedState);
+        checkBudget(runStartedNanos, "Planner");
         if (mediaId != null) {
             taskEventService.publishAnalysis(mediaId, relevantContext.userGoal(),
                     TaskStatus.of(TaskStatus.State.PROCESSING, "Planner 已完成任务拆解"),
@@ -83,18 +100,21 @@ public class AgentLoopService {
         // Executor 草稿已经落盘时，MQ 重试直接从 Critic 接着走，避免重复生成整份产物。
         if (state.result() != null && state.critique() == null && state.round() > 0) {
             telemetry.incrementCurrent("criticCheckpointResumes", 1);
+            checkBudget(runStartedNanos, "Executor Checkpoint");
             state = critiqueRound(mediaId, relevantContext, plan, state.result(), state.round());
-            if (!state.critique().passed() && state.round() < MAX_ROUNDS) {
+            if (!state.critique().passed() && state.round() < maxRounds) {
                 relevantContext = contextForRetry(
                         mediaId, context, relevantContext, state.critique());
                 plan = revisePlanForRetry(mediaId, relevantContext, plan, state.critique());
             }
         }
 
-        for (int round = state.round() + 1; round <= MAX_ROUNDS; round++) {
-            state = executeRound(mediaId, relevantContext, plan, state.critique(), round);
+        for (int round = state.round() + 1; round <= maxRounds; round++) {
+            checkBudget(runStartedNanos, "Agent Round " + round);
+            state = executeRound(
+                    mediaId, relevantContext, plan, state.critique(), round, runStartedNanos);
             if (state.critique().passed()) break;
-            if (round < MAX_ROUNDS) {
+            if (round < maxRounds) {
                 relevantContext = contextForRetry(
                         mediaId, context, relevantContext, state.critique());
                 plan = revisePlanForRetry(mediaId, relevantContext, plan, state.critique());
@@ -133,7 +153,8 @@ public class AgentLoopService {
                                     VideoContext context,
                                     AgentState.AgentPlan plan,
                                     AgentState.CriticResult previousCritique,
-                                    int round) {
+                                    int round,
+                                    long runStartedNanos) {
         publishStage(mediaId, context.userGoal(), "Executor 正在按计划生成结构化产物",
                 TaskStage.EXECUTOR_STARTED);
         AnalysisResult result = deepSeekUtils.execute(context, plan, previousCritique);
@@ -143,6 +164,7 @@ public class AgentLoopService {
             publishStage(mediaId, context.userGoal(), "Executor 草稿已保存，开始校验证据",
                     TaskStage.EXECUTOR_COMPLETED);
         }
+        checkBudget(runStartedNanos, "Executor");
         return critiqueRound(mediaId, context, plan, result, round);
     }
 
@@ -168,7 +190,7 @@ public class AgentLoopService {
             if (critique.passed()) {
                 message = "Critic 校验通过，正在整理结构化结果";
                 stage = TaskStage.CRITIC_PASSED;
-            } else if (round >= MAX_ROUNDS) {
+            } else if (round >= maxRounds) {
                 message = "Critic 达到最大校验轮次，正在保留警告并生成结果";
                 stage = TaskStage.ANALYSIS_COMPLETED_WITH_WARNINGS;
             } else if (requiresEvidenceRefresh(critique)) {
@@ -247,14 +269,21 @@ public class AgentLoopService {
         List<AnalysisResult.Evidence> invalidEvidence = result.evidence().stream()
                 .filter(evidence -> !evidenceVerificationService.supported(context, evidence))
                 .toList();
-        if (invalidEvidence.isEmpty()) return critique;
+        List<String> unsupportedClaims = result.conclusions().stream()
+                .filter(claim -> result.evidence().stream().noneMatch(
+                        evidence -> evidenceVerificationService.supportsClaim(context, claim, evidence)))
+                .toList();
+        if (invalidEvidence.isEmpty() && unsupportedClaims.isEmpty()) return critique;
 
         List<String> unsupported = new ArrayList<>(critique.unsupportedClaims());
+        unsupportedClaims.stream()
+                .filter(claim -> !unsupported.contains(claim))
+                .forEach(unsupported::add);
         invalidEvidence.stream()
                 .map(evidence -> "证据无法在原始 ASR/OCR 中核验: " + evidence.timestampMs())
                 .forEach(unsupported::add);
         List<String> feedback = new ArrayList<>(critique.feedback());
-        feedback.add("重新检索并绑定有效时间戳证据");
+        feedback.add("为每条结论重新检索并绑定可核验的时间戳证据");
         List<Long> requiredTimestamps = new ArrayList<>(critique.requiredTimestamps());
         invalidEvidence.stream()
                 .map(AnalysisResult.Evidence::timestampMs)
@@ -341,6 +370,28 @@ public class AgentLoopService {
         if (mediaId == null) return;
         taskEventService.publishAnalysis(mediaId, goal,
                 TaskStatus.of(TaskStatus.State.PROCESSING, message), stage);
+    }
+
+    private void checkBudget(long startedNanos, String completedStage) {
+        long elapsedMs = (System.nanoTime() - startedNanos) / 1_000_000;
+        AgentTelemetry.BudgetUsage usage = telemetry.currentUsage();
+        String reason = null;
+        if (elapsedMs > maxDurationMs) {
+            reason = "Agent 超过最大执行时长 " + maxDurationMs + "ms";
+        } else if (usage.estimatedTokens() > maxEstimatedTokens) {
+            reason = "Agent 超过最大 Token 预算 " + maxEstimatedTokens;
+        } else if (usage.estimatedCost() > maxEstimatedCost) {
+            reason = "Agent 超过最大成本预算 " + maxEstimatedCost;
+        }
+        if (reason == null) return;
+        telemetry.incrementCurrent("budgetTerminations", 1);
+        throw new BudgetExceededException(completedStage + " 后终止：" + reason);
+    }
+
+    public static class BudgetExceededException extends IllegalStateException {
+        public BudgetExceededException(String message) {
+            super(message);
+        }
     }
 
     private AgentState.CriticResult normalizeCritique(AgentState.CriticResult critique) {

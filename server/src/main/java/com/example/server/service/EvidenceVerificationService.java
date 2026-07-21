@@ -29,6 +29,15 @@ public class EvidenceVerificationService {
                 .anyMatch(candidate -> textMatches(evidence.content(), candidate));
     }
 
+    public boolean supportsClaim(VideoContext context,
+                                 String claim,
+                                 AnalysisResult.Evidence evidence) {
+        return evidence != null
+                && !normalize(claim).isEmpty()
+                && normalize(claim).equals(normalize(evidence.claim()))
+                && supported(context, evidence);
+    }
+
     private boolean containsTimestamp(VideoContext.VideoSegment segment, long timestampMs) {
         return timestampMs >= segment.startMs() && timestampMs < segment.endMs();
     }

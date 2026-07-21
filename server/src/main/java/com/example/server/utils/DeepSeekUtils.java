@@ -134,7 +134,8 @@ public class DeepSeekUtils {
             String prompt = """
                     你是 Video Agent 的 Executor。按照计划分析 VideoContext 并生成结构化产物。
                     逐项执行 Plan 中的任务，最终产物必须覆盖全部任务。
-                    所有重要结论必须绑定真实 timestampMs，并标明来源为 ASR 或 OCR。
+                    conclusions 中的每条结论都必须至少绑定一条真实证据。
+                    evidence.claim 必须原样复制它所支持的 conclusion，timestampMs 必须落在原始片段内，source 只能是 ASR、OCR 或 ASR+OCR。
                     不得使用视频上下文之外的事实。
                     如果存在 Critic 反馈，只修正被指出的问题，并保留已经核验通过的结论和证据。
 
@@ -143,7 +144,7 @@ public class DeepSeekUtils {
                       "title": "产物标题",
                       "conclusions": ["结论"],
                       "evidence": [
-                        {"timestampMs": 120000, "source": "ASR或OCR", "content": "证据内容"}
+                        {"timestampMs": 120000, "source": "ASR", "content": "原始证据内容", "claim": "结论"}
                       ],
                       "suggestions": ["建议"]
                     }
@@ -170,9 +171,10 @@ public class DeepSeekUtils {
                     你是 Video Agent 的 Critic，只负责检查，不负责改写产物。
                     检查标准：
                     1. 是否覆盖用户目标和 Planner 的全部任务；
-                    2. 每个重要结论是否能在 VideoContext 中找到时间戳证据；
-                    3. 是否存在上下文不支持的结论；
-                    4. title、conclusions、evidence、suggestions 是否完整。
+                    2. conclusions 中的每条结论是否都有 evidence.claim 的明确绑定；
+                    3. 每条绑定证据的时间戳、来源和原文是否能在 VideoContext 中核验；
+                    4. 是否存在上下文不支持的结论；
+                    5. title、conclusions、evidence、suggestions 是否完整。
 
                     只有全部满足时 passed 才能为 true。
                     feedback 只填写能够基于当前 VideoContext 直接重写的修改动作。

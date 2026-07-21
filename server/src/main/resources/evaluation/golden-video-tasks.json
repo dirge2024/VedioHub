@@ -1,0 +1,70 @@
+[
+  {
+    "name": "课程视频-ASR与OCR互补",
+    "context": {
+      "source": "offline://binary-tree-course",
+      "userGoal": "生成二叉树前序遍历学习笔记，给出步骤和证据",
+      "segments": [
+        {
+          "startMs": 120000,
+          "endMs": 180000,
+          "transcript": "前序遍历先访问根节点，然后递归访问左子树，最后访问右子树。",
+          "ocrTexts": ["前序遍历：根节点、左子树、右子树"],
+          "evidenceFrames": ["frame_000125.jpg"]
+        }
+      ]
+    },
+    "expectedKeywords": ["前序遍历", "根节点", "左子树", "右子树"]
+  },
+  {
+    "name": "会议视频-纯语音待办",
+    "context": {
+      "source": "offline://project-meeting",
+      "userGoal": "整理会议结论、负责人和截止时间",
+      "segments": [
+        {
+          "startMs": 0,
+          "endMs": 60000,
+          "transcript": "会议决定在七月二十五日前完成灰度发布，负责人是张明。",
+          "ocrTexts": [],
+          "evidenceFrames": []
+        }
+      ]
+    },
+    "expectedKeywords": ["七月二十五日", "灰度发布", "张明"]
+  },
+  {
+    "name": "操作录屏-纯画面步骤",
+    "context": {
+      "source": "offline://frontend-build",
+      "userGoal": "提取画面中的构建命令和输出目录",
+      "segments": [
+        {
+          "startMs": 30000,
+          "endMs": 60000,
+          "transcript": "",
+          "ocrTexts": ["npm run build", "Build completed: dist/"],
+          "evidenceFrames": ["frame_000035.jpg"]
+        }
+      ]
+    },
+    "expectedKeywords": ["npm run build", "dist"]
+  },
+  {
+    "name": "音画冲突-保留不确定性",
+    "context": {
+      "source": "offline://conflicting-deadline",
+      "userGoal": "核验视频中的最终上线日期，存在冲突时明确指出",
+      "segments": [
+        {
+          "startMs": 60000,
+          "endMs": 120000,
+          "transcript": "我们计划八月一日正式上线。",
+          "ocrTexts": ["正式上线：8月3日"],
+          "evidenceFrames": ["frame_000075.jpg"]
+        }
+      ]
+    },
+    "expectedKeywords": ["8月1日", "8月3日", "冲突"]
+  }
+]

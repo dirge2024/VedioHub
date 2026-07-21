@@ -28,6 +28,9 @@ public class AnalysisStatusService {
             TaskStatus.State state = stage == null ? TaskStatus.State.QUEUED : TaskStatus.State.PROCESSING;
             return TaskStatus.of(state, statusMessage(stage));
         }
+        if (stage == TaskStage.BUDGET_EXHAUSTED) {
+            return TaskStatus.of(TaskStatus.State.FAILED, "Agent 已达到本次任务预算，请调整目标后重试");
+        }
         if (stage == TaskStage.FAILED || stage == TaskStage.DEAD_LETTERED) {
             return TaskStatus.of(TaskStatus.State.FAILED, "分析失败，请稍后重试");
         }

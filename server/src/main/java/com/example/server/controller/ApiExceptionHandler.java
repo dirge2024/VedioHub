@@ -1,5 +1,6 @@
 package com.example.server.controller;
 
+import com.example.server.service.AgentLoopService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
@@ -27,6 +28,11 @@ public class ApiExceptionHandler {
     @ExceptionHandler(SecurityException.class)
     public ResponseEntity<String> forbidden(SecurityException error) {
         return ResponseEntity.status(HttpStatus.FORBIDDEN).body(error.getMessage());
+    }
+
+    @ExceptionHandler(AgentLoopService.BudgetExceededException.class)
+    public ResponseEntity<String> budgetExceeded(AgentLoopService.BudgetExceededException error) {
+        return ResponseEntity.status(HttpStatus.UNPROCESSABLE_ENTITY).body(error.getMessage());
     }
 
     @ExceptionHandler(Exception.class)

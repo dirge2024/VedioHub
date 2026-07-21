@@ -6,6 +6,7 @@ import com.example.server.dto.TaskStatus;
 import com.example.server.dto.TaskStage;
 import com.example.server.service.AiService;
 import com.example.server.service.AgentCheckpointService;
+import com.example.server.service.AgentLoopService;
 import com.example.server.service.FailedAnalysisTaskService;
 import com.example.server.service.MediaService;
 import com.example.server.service.TaskEventService;
@@ -130,6 +131,13 @@ public class VideoAnalysisConsumer implements RocketMQListener<AnalysisTaskMsg> 
                 taskEventService.publishAnalysis(mediaId, msg.getUserGoal(),
                         TaskStatus.completed(completed.result().toMarkdown()), TaskStage.COMPLETED);
             }
+        } catch (AgentLoopService.BudgetExceededException e) {
+            saveStage(mediaId, msg.getUserGoal(), TaskStage.BUDGET_EXHAUSTED);
+            taskEventService.publishAnalysis(mediaId, msg.getUserGoal(),
+                    TaskStatus.of(TaskStatus.State.FAILED, e.getMessage()),
+                    TaskStage.BUDGET_EXHAUSTED);
+            log.warn("video_analysis_budget_exhausted mediaId={} reason={}", mediaId, e.getMessage());
+            return;
         } catch (Exception e) {
             if (acquired && attempt > 0 && attempt < MAX_DELIVERY_ATTEMPTS) {
                 // 重试期间 active 不能掉，不然前端会以为任务结束，又塞进来一份相同工作。

@@ -21,12 +21,14 @@ public record AnalysisResult(
     public record Evidence(
             long timestampMs,
             String source,
-            String content
+            String content,
+            String claim
     ) {
         public Evidence {
             if (timestampMs < 0) throw new IllegalArgumentException("evidence timestamp cannot be negative");
             source = source == null ? "UNKNOWN" : source.trim();
             content = content == null ? "" : content.trim();
+            claim = claim == null ? "" : claim.trim();
         }
     }
 

@@ -27,18 +27,24 @@ public class AgentEvaluationService {
         AgentState state = checkpointService.loadResult(mediaId, goal);
         if (state == null) state = checkpointService.loadCriticState(mediaId, goal);
 
-        AnalysisResult result = state == null ? null : state.result();
         List<AgentFeedback> feedback = checkpointService.loadFeedback(mediaId).stream()
                 .filter(item -> goal.equals(item.goal()) || goal.equals(item.correctedGoal()))
                 .toList();
 
+        Map<String, Object> metrics = new LinkedHashMap<>(evaluate(context, state));
+        metrics.put("userAcceptanceRate", userAcceptanceRate(feedback));
+        metrics.put("feedbackSamples", feedback.size());
+        return metrics;
+    }
+
+    public Map<String, Object> evaluate(VideoContext context, AgentState state) {
+        AnalysisResult result = state == null ? null : state.result();
         Map<String, Object> metrics = new LinkedHashMap<>();
         metrics.put("structuredValid", structuredValid(result));
         metrics.put("timestampCoverageRate", timestampCoverageRate(context, result));
         metrics.put("evidenceSupportRate", evidenceSupportRate(context, result));
+        metrics.put("claimEvidenceSupportRate", claimEvidenceSupportRate(context, result));
         metrics.put("criticPassed", state != null && state.critique() != null && state.critique().passed());
-        metrics.put("userAcceptanceRate", userAcceptanceRate(feedback));
-        metrics.put("feedbackSamples", feedback.size());
         return metrics;
     }
 
@@ -63,6 +69,15 @@ public class AgentEvaluationService {
                 .filter(evidence -> evidenceVerificationService.timestampCovered(context, evidence))
                 .count();
         return (double) covered / result.evidence().size();
+    }
+
+    private double claimEvidenceSupportRate(VideoContext context, AnalysisResult result) {
+        if (context == null || result == null || result.conclusions().isEmpty()) return 0;
+        long supported = result.conclusions().stream()
+                .filter(claim -> result.evidence().stream().anyMatch(
+                        evidence -> evidenceVerificationService.supportsClaim(context, claim, evidence)))
+                .count();
+        return (double) supported / result.conclusions().size();
     }
 
     private double userAcceptanceRate(List<AgentFeedback> feedback) {

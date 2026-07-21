@@ -125,6 +125,19 @@ public class AgentTelemetry {
         stage(traceId, stage, startedNanos, true);
     }
 
+    public BudgetUsage currentUsage() {
+        String traceId = currentTrace.get();
+        TraceData trace = traceId == null ? null : traces.get(traceId);
+        return trace == null
+                ? new BudgetUsage(0, 0)
+                : new BudgetUsage(
+                trace.counterValue("inputTokensEstimated")
+                        + trace.counterValue("outputTokensEstimated"),
+                trace.estimatedCost.sum());
+    }
+
+    public record BudgetUsage(long estimatedTokens, double estimatedCost) { }
+
     public Map<String, Object> latest(Long taskId, String goal) {
         String taskKey = taskKey(taskId, goal);
         String traceId = latestTraceByTask.get(taskKey);
@@ -227,6 +240,11 @@ public class AgentTelemetry {
 
         private void increment(String metric, long amount) {
             counters.computeIfAbsent(metric, key -> new LongAdder()).add(amount);
+        }
+
+        private long counterValue(String metric) {
+            LongAdder value = counters.get(metric);
+            return value == null ? 0 : value.sum();
         }
 
         private Map<String, Object> snapshot() {

@@ -21,6 +21,14 @@ public record VideoChunk(
         embedding = embedding == null ? List.of() : List.copyOf(embedding);
     }
 
+    public long startMs() {
+        return startTime;
+    }
+
+    public long endMs() {
+        return endTime;
+    }
+
     public record ChunkSummary(
             String segmentSummary,
             List<String> keywords

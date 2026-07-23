@@ -51,7 +51,7 @@ public class AliyunAsrUtils {
                 String text = execute(file);
                 if (text == null || text.isBlank()) throw new IllegalStateException("ASR 返回空文本");
                 return text.trim();
-            } catch (RetryableAsrException | IOException e) {
+            } catch (IOException e) {
                 lastError = e;
                 log.warn("asr_attempt_failed attempt={} file={}", attempt + 1, file.getName(), e);
                 if (attempt < MAX_ATTEMPTS - 1) waitBeforeRetry(attempt);

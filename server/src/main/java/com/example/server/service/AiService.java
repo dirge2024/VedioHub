@@ -5,11 +5,14 @@ import com.example.server.dto.AgentState;
 import com.example.server.dto.TaskStatus;
 import com.example.server.dto.TaskStage;
 import com.example.server.dto.VideoContext;
+import com.example.server.dto.VideoEvidenceHit;
 import com.example.server.entity.MediaFile;
 import com.example.server.mapper.MediaFileMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
+
+import java.util.List;
 
 /** 视频分析的应用层入口，负责串起上下文构建、AgentLoop 和结果落库。 */
 @Service
@@ -19,6 +22,7 @@ public class AiService {
 
     private final MediaFileMapper mediaFileMapper;
     private final VideoContextService videoContextService;
+    private final LongVideoContextService longVideoContextService;
     private final AgentLoopService agentLoopService;
     private final AgentCheckpointService checkpointService;
     private final AgentTelemetry telemetry;
@@ -27,6 +31,7 @@ public class AiService {
 
     public AiService(MediaFileMapper mediaFileMapper,
                      VideoContextService videoContextService,
+                     LongVideoContextService longVideoContextService,
                      AgentLoopService agentLoopService,
                      AgentCheckpointService checkpointService,
                      AgentTelemetry telemetry,
@@ -34,6 +39,7 @@ public class AiService {
                      TaskEventService taskEventService) {
         this.mediaFileMapper = mediaFileMapper;
         this.videoContextService = videoContextService;
+        this.longVideoContextService = longVideoContextService;
         this.agentLoopService = agentLoopService;
         this.checkpointService = checkpointService;
         this.telemetry = telemetry;
@@ -125,7 +131,7 @@ public class AiService {
 
     public String followUp(Long mediaId, String originalGoal, String question) {
         VideoContext context = checkpointService.loadContext(mediaId);
-        if (context == null) throw new IllegalStateException("视频尚未完成 VideoContext 构建");
+        if (context == null) throw new VideoContextNotReadyException();
 
         String traceId = telemetry.start(mediaId, question);
         telemetry.bind(traceId);
@@ -136,6 +142,29 @@ public class AiService {
             VideoContext followUpContext = new VideoContext(
                     context.source(), followUpGoal, context.segments());
             return agentLoopService.run(mediaId, followUpContext).result().toMarkdown();
+        } finally {
+            telemetry.flush(traceId);
+            telemetry.clear();
+        }
+    }
+
+    public List<VideoEvidenceHit> searchEvidence(Long mediaId, String query) {
+        VideoContext context = checkpointService.loadContext(mediaId);
+        if (context == null) throw new VideoContextNotReadyException();
+
+        String traceId = telemetry.start(mediaId, query);
+        telemetry.bind(traceId);
+        long started = System.nanoTime();
+        try {
+            VideoContext searchContext = new VideoContext(
+                    context.source(), query, context.segments());
+            List<VideoEvidenceHit> hits =
+                    longVideoContextService.searchEvidence(mediaId, searchContext);
+            telemetry.stage(traceId, TaskStage.RETRIEVAL.name(), started, true);
+            return hits;
+        } catch (RuntimeException e) {
+            telemetry.stage(traceId, TaskStage.RETRIEVAL.name(), started, false);
+            throw e;
         } finally {
             telemetry.flush(traceId);
             telemetry.clear();

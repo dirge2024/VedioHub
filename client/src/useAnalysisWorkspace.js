@@ -45,6 +45,10 @@ function createSidebarState() {
     playbackError: '',
     followUp: '',
     followUpLoading: false,
+    evidenceQuery: '',
+    evidenceLoading: false,
+    evidenceResults: [],
+    evidenceError: '',
     plan: null,
     trace: null,
     evaluation: null,
@@ -64,6 +68,7 @@ export function useAnalysisWorkspace({
   findMediaItem
 }) {
   const sidebar = ref(createSidebarState())
+  let evidenceRequestVersion = 0
   const traceStages = computed(() => Object.entries(sidebar.value.trace?.stageDurationMs || {})
     .map(([stage, duration]) => [STAGE_LABELS[stage] || stage, formatDuration(duration)]))
   const renderedMarkdown = computed(() => renderMarkdown(sidebar.value.content))
@@ -83,6 +88,7 @@ export function useAnalysisWorkspace({
     if (sidebar.value.type === 'ai' && sidebar.value.mediaId) {
       saveGoalDraft(sidebar.value.mediaId, sidebar.value.goal)
     }
+    evidenceRequestVersion += 1
     sidebar.value.visible = false
   }
 
@@ -250,6 +256,7 @@ export function useAnalysisWorkspace({
   }
 
   const openAgent = async item => {
+    evidenceRequestVersion += 1
     const goal = loadGoalDraft(item.id)
     sidebar.value = {
       ...createSidebarState(),
@@ -422,6 +429,55 @@ export function useAnalysisWorkspace({
     }
   }
 
+  const searchEvidence = async () => {
+    const query = sidebar.value.evidenceQuery.trim()
+    if (!query || sidebar.value.evidenceLoading) return
+    const requestVersion = ++evidenceRequestVersion
+    const mediaId = sidebar.value.mediaId
+    sidebar.value.evidenceLoading = true
+    sidebar.value.evidenceError = ''
+    sidebar.value.evidenceResults = []
+    try {
+      if (demoMode) {
+        const demoResults = [{
+          startMs: 522000,
+          endMs: 582000,
+          source: 'ASR+OCR',
+          snippet: '迭代遍历使用显式栈保存待访问节点，画面展示了前序遍历顺序。',
+          transcript: '迭代遍历使用显式栈保存待访问节点。',
+          ocrTexts: ['前序遍历：根节点、左子树、右子树']
+        }]
+        if (requestVersion === evidenceRequestVersion) {
+          sidebar.value.evidenceResults = demoResults
+        }
+        return
+      }
+      const params = new URLSearchParams({
+        id: String(mediaId),
+        query
+      })
+      const response = await apiRequest(`/analysis/evidence-search?${params}`)
+      if (!response.ok) {
+        const detail = await response.text()
+        throw new Error(detail || '视频证据检索失败')
+      }
+      const results = await response.json()
+      if (requestVersion !== evidenceRequestVersion || sidebar.value.mediaId !== mediaId) return
+      sidebar.value.evidenceResults = Array.isArray(results) ? results : []
+      if (!sidebar.value.evidenceResults.length) {
+        sidebar.value.evidenceError = '没有找到匹配的视频证据'
+      }
+    } catch (error) {
+      if (requestVersion !== evidenceRequestVersion || sidebar.value.mediaId !== mediaId) return
+      sidebar.value.evidenceResults = []
+      sidebar.value.evidenceError = error.message || '视频证据检索失败'
+    } finally {
+      if (requestVersion === evidenceRequestVersion && sidebar.value.mediaId === mediaId) {
+        sidebar.value.evidenceLoading = false
+      }
+    }
+  }
+
   const sendFeedback = async rating => {
     if (sidebar.value.feedbackLoading || sidebar.value.feedback === rating) return
     if (demoMode) {
@@ -465,6 +521,7 @@ export function useAnalysisWorkspace({
   }
 
   const resetWorkspace = () => {
+    evidenceRequestVersion += 1
     sidebar.value = createSidebarState()
   }
 
@@ -495,6 +552,7 @@ export function useAnalysisWorkspace({
     removePlanTask,
     rerunWithPlan,
     submitFollowUp,
+    searchEvidence,
     sendFeedback,
     retryPlayback,
     handlePlaybackError,

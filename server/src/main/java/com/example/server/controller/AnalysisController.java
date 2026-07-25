@@ -3,6 +3,7 @@ package com.example.server.controller;
 import com.example.server.dto.AgentFeedback;
 import com.example.server.dto.AgentState;
 import com.example.server.dto.TaskStatus;
+import com.example.server.dto.VideoEvidenceHit;
 import com.example.server.entity.MediaFile;
 import com.example.server.service.AgentCheckpointService;
 import com.example.server.service.AnalysisDispatchService;
@@ -85,6 +86,15 @@ public class AnalysisController {
                 ? null : normalizeText(goal, "原始分析目标");
         mediaService.requireOwnedMedia(id, userId);
         return ResponseEntity.ok(aiService.followUp(id, normalizedGoal, normalizedQuestion));
+    }
+
+    @GetMapping("/evidence-search")
+    public List<VideoEvidenceHit> searchEvidence(
+            @RequestParam Long id,
+            @RequestParam String query,
+            @RequestAttribute(AuthService.REQUEST_USER_ID) Long userId) {
+        mediaService.requireOwnedMedia(id, userId);
+        return aiService.searchEvidence(id, normalizeText(query, "检索问题"));
     }
 
     @PostMapping("/agent-feedback")

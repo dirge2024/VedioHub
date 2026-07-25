@@ -60,8 +60,8 @@ public class QdrantVectorStore {
             for (VideoChunk chunk : vectorized) {
                 JSONObject payload = new JSONObject();
                 payload.put("mediaId", mediaId);
-                payload.put("startMs", chunk.startMs());
-                payload.put("endMs", chunk.endMs());
+                payload.put("startMs", chunk.startTime());
+                payload.put("endMs", chunk.endTime());
 
                 JSONObject point = new JSONObject();
                 point.put("id", pointId(mediaId, chunk));
@@ -191,7 +191,7 @@ public class QdrantVectorStore {
     }
 
     private String pointId(Long mediaId, VideoChunk chunk) {
-        String source = mediaId + ":" + chunk.startMs() + ":" + chunk.endMs();
+        String source = mediaId + ":" + chunk.startTime() + ":" + chunk.endTime();
         return UUID.nameUUIDFromBytes(source.getBytes(StandardCharsets.UTF_8)).toString();
     }
 

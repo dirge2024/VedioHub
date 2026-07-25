@@ -1,6 +1,7 @@
 package com.example.server.controller;
 
 import com.example.server.service.AgentLoopService;
+import com.example.server.service.VideoContextNotReadyException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
@@ -33,6 +34,11 @@ public class ApiExceptionHandler {
     @ExceptionHandler(AgentLoopService.BudgetExceededException.class)
     public ResponseEntity<String> budgetExceeded(AgentLoopService.BudgetExceededException error) {
         return ResponseEntity.status(HttpStatus.UNPROCESSABLE_ENTITY).body(error.getMessage());
+    }
+
+    @ExceptionHandler(VideoContextNotReadyException.class)
+    public ResponseEntity<String> videoContextNotReady(VideoContextNotReadyException error) {
+        return ResponseEntity.status(HttpStatus.CONFLICT).body(error.getMessage());
     }
 
     @ExceptionHandler(Exception.class)

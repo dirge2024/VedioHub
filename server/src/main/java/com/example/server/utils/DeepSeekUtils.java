@@ -4,6 +4,7 @@ import com.example.server.dto.AgentState;
 import com.example.server.dto.AnalysisResult;
 import com.example.server.dto.VideoChunk;
 import com.example.server.dto.VideoContext;
+import com.example.server.dto.VideoRetrievalIntent;
 import com.example.server.service.AgentTelemetry;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.langchain4j.model.chat.ChatModel;
@@ -113,6 +114,27 @@ public class DeepSeekUtils {
             return structuredChat("PLANNER_REPAIR", prompt, AgentState.AgentPlan.class);
         } catch (Exception e) {
             throw new IllegalStateException("Agent 任务计划修复失败", e);
+        }
+    }
+
+    public VideoRetrievalIntent planRetrieval(String goal) {
+        try {
+            String prompt = """
+                    你是 Video Agent 的检索规划器。把用户目标改写成适合检索长视频证据的查询。
+                    semanticQuery 用于检索语音、摘要和上下文语义。
+                    keywords 保留人物、概念、事件和专有名词。
+                    visualKeywords 只保留可能出现在字幕、PPT、代码或画面文字中的词；没有则返回空数组。
+                    不回答用户问题，只返回 JSON：
+                    {
+                      "semanticQuery": "完整、明确的检索语句",
+                      "keywords": ["关键词"],
+                      "visualKeywords": ["画面文字关键词"]
+                    }
+                    用户目标：
+                    """ + goal;
+            return structuredChat("RETRIEVAL_PLANNER", prompt, VideoRetrievalIntent.class);
+        } catch (Exception e) {
+            throw new IllegalStateException("视频检索目标拆解失败", e);
         }
     }
 
@@ -268,4 +290,5 @@ public class DeepSeekUtils {
             throw new IllegalStateException("模型重试被中断", e);
         }
     }
+
 }

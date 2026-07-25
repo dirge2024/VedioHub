@@ -275,6 +275,33 @@
                 <button type="button" @click="copyResult">复制结果</button>
                 <button type="button" @click="downloadResult">导出 Markdown</button>
               </div>
+              <div class="evidence-search">
+                <div class="evidence-search-form">
+                  <input
+                      v-model="sidebar.evidenceQuery"
+                      aria-label="视频证据检索"
+                      maxlength="500"
+                      placeholder="定位 PPT、字幕、代码或某段讲解"
+                      @keyup.enter="searchEvidence"
+                  />
+                  <button type="button" :disabled="sidebar.evidenceLoading || !sidebar.evidenceQuery.trim()" @click="searchEvidence">
+                    {{ sidebar.evidenceLoading ? '检索中' : '定位证据' }}
+                  </button>
+                </div>
+                <p v-if="sidebar.evidenceError" class="evidence-search-error" aria-live="polite">{{ sidebar.evidenceError }}</p>
+                <div v-if="sidebar.evidenceResults.length" class="evidence-search-results" aria-live="polite">
+                  <button
+                      v-for="hit in sidebar.evidenceResults"
+                      :key="`${hit.startMs}-${hit.endMs}`"
+                      type="button"
+                      @click="seekToEvidence(hit.startMs)"
+                  >
+                    <strong>{{ formatEvidenceTime(hit.startMs) }}</strong>
+                    <small>{{ hit.source || '视频证据' }}</small>
+                    <span>{{ hit.snippet || '该时间段暂无可展示文本' }}</span>
+                  </button>
+                </div>
+              </div>
               <div class="markdown-content" v-html="renderedMarkdown" @click="seekEvidence"></div>
               <details v-if="sidebar.plan?.tasks?.length || traceStages.length" class="agent-inspector">
                 <summary>分析详情</summary>
@@ -605,6 +632,7 @@ const {
   removePlanTask,
   rerunWithPlan,
   submitFollowUp,
+  searchEvidence,
   sendFeedback,
   retryPlayback,
   handlePlaybackError,
@@ -619,16 +647,38 @@ const {
   findMediaItem: id => list.value.find(item => item.id === id)
 })
 
+const seekVideo = seconds => {
+  if (!Number.isFinite(seconds)) return
+  const player = videoPlayer.value
+  if (!player) {
+    showMsg('原视频尚未加载完成', true)
+    return
+  }
+  if (player.readyState === 0) {
+    player.addEventListener('loadedmetadata', () => seekVideo(seconds), { once: true })
+    return
+  }
+  const duration = player.duration
+  const maxTime = Number.isFinite(duration) ? Math.max(0, duration - 0.1) : Number.MAX_SAFE_INTEGER
+  player.currentTime = Math.min(Math.max(0, seconds), maxTime)
+  player.play().catch(() => {})
+  player.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+}
+
 const seekEvidence = event => {
   const link = event.target.closest('a[href^="#video-t="]')
-  if (!link || !videoPlayer.value) return
+  if (!link) return
   event.preventDefault()
-  const seconds = Number(link.getAttribute('href').split('=')[1])
-  if (!Number.isFinite(seconds)) return
-  const duration = videoPlayer.value.duration
-  const maxTime = Number.isFinite(duration) ? Math.max(0, duration - 0.1) : Number.MAX_SAFE_INTEGER
-  videoPlayer.value.currentTime = Math.min(Math.max(0, seconds), maxTime)
-  videoPlayer.value.play().catch(() => {})
+  seekVideo(Number(link.getAttribute('href').split('=')[1]))
+}
+
+const seekToEvidence = timestampMs => seekVideo(Number(timestampMs) / 1000)
+const formatEvidenceTime = timestampMs => {
+  const seconds = Math.max(0, Math.floor(Number(timestampMs) / 1000))
+  const hours = Math.floor(seconds / 3600)
+  const minutes = Math.floor((seconds % 3600) / 60)
+  const time = `${String(minutes).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}`
+  return hours ? `${String(hours).padStart(2, '0')}:${time}` : time
 }
 
 const copyResult = async () => {
@@ -1062,6 +1112,25 @@ html, body, #app {
   font-weight: 700; cursor: pointer;
 }
 .agent-run-btn:disabled, .follow-up-box button:disabled { opacity: 0.4; cursor: not-allowed; }
+.evidence-search { margin: 18px 0 24px; }
+.evidence-search-form { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
+.evidence-search-form input {
+  min-width: 0; border: 1px solid var(--border-tech); border-radius: 4px; background: #090a0d;
+  color: var(--text-main); padding: 10px 12px; outline: none;
+}
+.evidence-search-form input:focus { border-color: var(--accent-lime); }
+.evidence-search-form button, .evidence-search-results button {
+  border: 1px solid var(--border-tech); border-radius: 4px; background: transparent;
+  color: var(--text-sub); padding: 9px 11px; cursor: pointer;
+}
+.evidence-search-form button:hover, .evidence-search-results button:hover { border-color: var(--accent-lime); color: var(--accent-lime); }
+.evidence-search-form button:disabled { opacity: 0.4; cursor: not-allowed; }
+.evidence-search-error { margin-top: 8px; color: #ff9aa4; font-size: 0.82rem; }
+.evidence-search-results { display: grid; gap: 6px; margin-top: 8px; }
+.evidence-search-results button { display: grid; grid-template-columns: 58px 70px minmax(0, 1fr); gap: 10px; text-align: left; }
+.evidence-search-results strong { color: var(--accent-lime); }
+.evidence-search-results small { color: var(--accent-purple); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.evidence-search-results span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .agent-running { display: flex; flex-direction: column; gap: 20px; }
 .agent-running .loading-state { min-height: 210px; height: auto; }
 .agent-inspector { margin-top: 28px; border-top: 1px solid var(--border-tech); padding-top: 16px; }
@@ -1150,6 +1219,9 @@ html, body, #app {
   .goal-presets button { min-height: 68px; }
   .result-actions { justify-content: stretch; }
   .result-actions button { flex: 1; padding: 9px 4px; font-size: 0.76rem; }
+  .evidence-search-form { grid-template-columns: 1fr; }
+  .evidence-search-results button { grid-template-columns: 56px minmax(0, 1fr); }
+  .evidence-search-results small { display: none; }
   .follow-up-box { grid-template-columns: 1fr; }
   .follow-up-box button { min-height: 44px; }
   .delete-btn { opacity: 1; }

@@ -4,6 +4,17 @@ import { DEMO_EVALUATION, DEMO_ITEM, DEMO_PLAN, DEMO_RESULT, DEMO_TRACE } from '
 import { renderMarkdown } from './markdown'
 
 const DEFAULT_GOAL = '理解视频核心内容，提炼关键结论，并给出带时间戳的证据和可执行建议'
+
+// 分析模式选项。GENERAL/LEARNING/REVIEW/CREATION 与后端 AnalysisMode 枚举一一对应,value 直接作为 mode 参数;
+// AUTO 是纯前端选项:提交前先调 /analysis/route 让 AI 判定出具体模式,再据此发起分析——
+// AUTO 本身绝不会作为 mode 发到任何带 key 的后端接口,从根上避免读写端 key 不对称。
+const ANALYSIS_MODES = [
+  { value: 'AUTO', title: '自动', description: 'AI 按目标智能选择模式' },
+  { value: 'GENERAL', title: '通用', description: '结论 · 时间戳证据 · 建议' },
+  { value: 'LEARNING', title: '学习', description: '知识点大纲 · 重点难点 · 自测题' },
+  { value: 'REVIEW', title: '审查', description: '逻辑漏洞 · 夸大表述 · 遗漏点' },
+  { value: 'CREATION', title: '创作', description: '爆点片段 · 标题 · 口播脚本' }
+]
 const GOAL_PRESETS = [
   {
     title: '学习笔记',
@@ -43,6 +54,7 @@ function createSidebarState() {
     streamRetry: 0,
     mediaId: null,
     goal: DEFAULT_GOAL,
+    analysisMode: 'GENERAL',
     playbackUrl: '',
     playbackLoading: false,
     playbackError: '',
@@ -94,7 +106,10 @@ export function useAnalysisWorkspace({
 
   const closeSidebar = () => {
     if (sidebar.value.type === 'ai' && sidebar.value.mediaId) {
+      // goal 与 mode 一起持久化:二者共同决定任务身份,重开时必须成对恢复,
+      // 否则会用错模式去查状态,导致"上次的非通用分析结果查不到"。
       saveGoalDraft(sidebar.value.mediaId, sidebar.value.goal)
+      saveModeDraft(sidebar.value.mediaId, sidebar.value.analysisMode)
     }
     evidenceRequestVersion += 1
     sidebar.value.visible = false
@@ -123,7 +138,8 @@ export function useAnalysisWorkspace({
   }
 
   const refreshAgentMeta = async (id, goal, includeEvaluation) => {
-    const params = new URLSearchParams({ id: String(id), goal })
+    // 带上模式,与提交/状态查询用同一套任务身份;agent-plan 按模式取,trace/evaluation 暂按通用。
+    const params = new URLSearchParams({ id: String(id), goal, mode: sidebar.value.analysisMode || 'GENERAL' })
     const requests = [
       apiRequest(`/analysis/agent-plan?${params}`),
       apiRequest(`/analysis/agent-trace?${params}`)
@@ -260,7 +276,7 @@ export function useAnalysisWorkspace({
     }
   }
 
-  const analyze = async (id, goal) => {
+  const analyze = async (id, goal, mode = 'GENERAL') => {
     if (taskStreams.has(id, 'ai', goal)) {
       sidebar.value.mode = 'result'
       sidebar.value.loading = true
@@ -275,7 +291,7 @@ export function useAnalysisWorkspace({
     sidebar.value.streamOffline = false
     sidebar.value.streamRetry = 0
     try {
-      const params = new URLSearchParams({ id: String(id), goal })
+      const params = new URLSearchParams({ id: String(id), goal, mode: mode || 'GENERAL' })
       const response = await apiRequest(`/analysis/ai?${params}`, { method: 'POST' })
       const message = await response.text()
       if (response.status === 409) {
@@ -308,18 +324,21 @@ export function useAnalysisWorkspace({
   const openAgent = async item => {
     evidenceRequestVersion += 1
     const goal = loadGoalDraft(item.id)
+    // 恢复上次使用的模式,与 goal 一起构成任务身份;缺省为通用模式。
+    const analysisMode = loadModeDraft(item.id)
     sidebar.value = {
       ...createSidebarState(),
       visible: true,
       title: `Video Agent · ${item.filename}`,
       mediaId: item.id,
-      goal
+      goal,
+      analysisMode
     }
     if (demoMode) return
 
     loadPlayback(item.id)
     try {
-      const params = new URLSearchParams({ id: String(item.id), goal })
+      const params = new URLSearchParams({ id: String(item.id), goal, mode: sidebar.value.analysisMode || 'GENERAL' })
       const response = await apiRequest(`/analysis/analysis-status?${params}`)
       if (!response.ok) {
         const detail = await response.text()
@@ -359,11 +378,21 @@ export function useAnalysisWorkspace({
     sidebar.value.evaluation = DEMO_EVALUATION
   }
 
-  const submitAgent = () => {
+  // AUTO 模式的意图路由:仅凭目标文本让后端 AI 判定出具体模式。apiRequest 已解包信封,
+  // response.json() 直接就是 { mode, reason }。失败由调用方兜底,这里只负责发起请求。
+  const routeMode = async goal => {
+    const params = new URLSearchParams({ goal })
+    const response = await apiRequest(`/analysis/route?${params}`)
+    if (!response.ok) throw new Error(await response.text())
+    return response.json()
+  }
+
+  const submitAgent = async () => {
     const goal = sidebar.value.goal.trim()
     if (!goal || sidebar.value.loading) return
+    const mediaId = sidebar.value.mediaId
     sidebar.value.error = ''
-    saveGoalDraft(sidebar.value.mediaId, goal)
+    saveGoalDraft(mediaId, goal)
     if (demoMode) {
       sidebar.value.mode = 'result'
       sidebar.value.loading = true
@@ -372,7 +401,34 @@ export function useAnalysisWorkspace({
       setTimeout(showDemoResult, 450)
       return
     }
-    analyze(sidebar.value.mediaId, goal)
+    let mode = sidebar.value.analysisMode || 'GENERAL'
+    if (mode === 'AUTO') {
+      // 先把 AUTO 落定成具体模式,再提交。落定结果写回 sidebar.analysisMode,
+      // 之后的状态查询 / 重跑 / 元信息刷新都用它,确保与提交端 key 完全一致。
+      sidebar.value.mode = 'result'
+      sidebar.value.loading = true
+      sidebar.value.content = ''
+      sidebar.value.statusMessage = '正在识别分析意图…'
+      let decision = null
+      try {
+        decision = await routeMode(goal)
+      } catch (error) {
+        console.warn('intent routing failed', error)
+      }
+      // 路由是异步的,用户可能已切到别的视频或改了目标;仅当仍停留在同一任务时才落定并继续。
+      if (sidebar.value.mediaId !== mediaId || sidebar.value.goal.trim() !== goal) return
+      if (decision && decision.mode) {
+        mode = decision.mode
+        showMessage(`AI 已识别为「${modeTitle(mode)}」模式：${decision.reason || ''}`.trim())
+      } else {
+        mode = 'GENERAL'
+        showMessage('意图识别暂不可用，已按通用模式分析', true)
+      }
+      sidebar.value.analysisMode = mode
+    }
+    // 记住这次实际使用的具体模式,重开面板时据此恢复,保证能查回本次分析结果。
+    saveModeDraft(mediaId, mode)
+    analyze(mediaId, goal, mode)
   }
 
   const startNewAnalysis = () => {
@@ -417,7 +473,8 @@ export function useAnalysisWorkspace({
     const goal = sidebar.value.goal
     sidebar.value.rerunLoading = true
     try {
-      const response = await apiRequest('/analysis/agent-revise', {
+      const reviseParams = new URLSearchParams({ mode: sidebar.value.analysisMode || 'GENERAL' })
+      const response = await apiRequest(`/analysis/agent-revise?${reviseParams}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -585,6 +642,7 @@ export function useAnalysisWorkspace({
     taskStreams.stopMedia(mediaId)
     try {
       localStorage.removeItem(goalDraftKey(mediaId))
+      localStorage.removeItem(modeDraftKey(mediaId))
     } catch {
       // Storage being unavailable should not block media deletion.
     }
@@ -594,6 +652,7 @@ export function useAnalysisWorkspace({
   return {
     sidebar,
     goalPresets: GOAL_PRESETS,
+    analysisModes: ANALYSIS_MODES,
     traceStages,
     renderedMarkdown,
     transcribe,
@@ -628,6 +687,10 @@ async function readSettledJson(result) {
   }
 }
 
+function modeTitle(value) {
+  return ANALYSIS_MODES.find(m => m.value === value)?.title || value
+}
+
 function formatDuration(value) {
   const milliseconds = Number(value) || 0
   if (milliseconds < 1000) return `${Math.round(milliseconds)} 毫秒`
@@ -650,6 +713,29 @@ function saveGoalDraft(mediaId, goal) {
   if (!mediaId || !goal?.trim()) return
   try {
     localStorage.setItem(goalDraftKey(mediaId), goal.trim())
+  } catch {
+    // Private browsing can disable storage; the current session still works.
+  }
+}
+
+function modeDraftKey(mediaId) {
+  return `dovideo:mode:${mediaId}`
+}
+
+function loadModeDraft(mediaId) {
+  try {
+    return localStorage.getItem(modeDraftKey(mediaId)) || 'GENERAL'
+  } catch {
+    return 'GENERAL'
+  }
+}
+
+// 只持久化“具体模式”。AUTO 是临时选择,落定后才是真实模式;绝不把 AUTO 写进草稿,
+// 否则重开时会用 AUTO 去查状态(后端按 GENERAL 解析),反而查不回真正的结果。
+function saveModeDraft(mediaId, mode) {
+  if (!mediaId || !mode || mode === 'AUTO') return
+  try {
+    localStorage.setItem(modeDraftKey(mediaId), mode)
   } catch {
     // Private browsing can disable storage; the current session still works.
   }

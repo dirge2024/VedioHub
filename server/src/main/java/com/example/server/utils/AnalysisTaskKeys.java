@@ -1,5 +1,7 @@
 package com.example.server.utils;
 
+import com.example.server.dto.AnalysisMode;
+
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -25,10 +27,31 @@ public final class AnalysisTaskKeys {
         if (goal == null || goal.isBlank()) {
             throw new IllegalArgumentException("analysis goal is required");
         }
+        return sha256(goal.trim());
+    }
+
+    /**
+     * 模式感知的目标摘要:任务身份 = (内容, 目标, 模式)。
+     *
+     * <p>GENERAL 直接委托 {@link #goalDigest(String)},摘要逐字节不变,与引入模式前的既有缓存/键
+     * 完全兼容;其余模式把模式名并入摘要,使"同一目标文本、不同模式"落在不同的 checkpoint / 去重 /
+     * 状态键上,互不污染。null 模式按 GENERAL 处理,保证历史消息与遗漏调用安全降级。
+     */
+    public static String goalDigest(String goal, AnalysisMode mode) {
+        if (mode == null || mode == AnalysisMode.GENERAL) {
+            return goalDigest(goal);
+        }
+        if (goal == null || goal.isBlank()) {
+            throw new IllegalArgumentException("analysis goal is required");
+        }
+        // U+241F 是不可见的单元分隔符,避免"模式名+目标"与某个真实目标文本发生摘要碰撞。
+        return sha256(mode.name() + '␟' + goal.trim());
+    }
+
+    private static String sha256(String value) {
         try {
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
-            return HexFormat.of().formatHex(
-                    digest.digest(goal.trim().getBytes(StandardCharsets.UTF_8)));
+            return HexFormat.of().formatHex(digest.digest(value.getBytes(StandardCharsets.UTF_8)));
         } catch (NoSuchAlgorithmException e) {
             throw new IllegalStateException("SHA-256 is not available", e);
         }

@@ -1,6 +1,7 @@
 package com.example.server.service;
 
 import com.example.server.dto.AgentState;
+import com.example.server.dto.AnalysisMode;
 import com.example.server.dto.TaskStage;
 import com.example.server.dto.TaskStatus;
 import org.springframework.stereotype.Service;
@@ -18,13 +19,17 @@ public class AnalysisStatusService {
     }
 
     public TaskStatus current(Long mediaId, String goal) {
-        AgentState result = checkpointService.loadResult(mediaId, goal);
+        return current(mediaId, goal, AnalysisMode.GENERAL);
+    }
+
+    public TaskStatus current(Long mediaId, String goal, AnalysisMode mode) {
+        AgentState result = checkpointService.loadResult(mediaId, goal, mode);
         if (result != null && result.result() != null) {
             return TaskStatus.completed(result.result().toMarkdown());
         }
 
-        TaskStage stage = checkpointService.loadStage(mediaId, goal);
-        if (dispatchService.isActive(mediaId, goal)) {
+        TaskStage stage = checkpointService.loadStage(mediaId, goal, mode);
+        if (dispatchService.isActive(mediaId, goal, mode)) {
             TaskStatus.State state = stage == null ? TaskStatus.State.QUEUED : TaskStatus.State.PROCESSING;
             return TaskStatus.of(state, statusMessage(stage));
         }
@@ -38,7 +43,11 @@ public class AnalysisStatusService {
     }
 
     public TaskStage stage(Long mediaId, String goal) {
-        return checkpointService.loadStage(mediaId, goal);
+        return stage(mediaId, goal, AnalysisMode.GENERAL);
+    }
+
+    public TaskStage stage(Long mediaId, String goal, AnalysisMode mode) {
+        return checkpointService.loadStage(mediaId, goal, mode);
     }
 
     private String statusMessage(TaskStage stage) {

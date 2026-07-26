@@ -279,6 +279,18 @@
             <p v-if="sidebar.playbackUrl">点击分析结果中的时间戳，可跳转到对应画面</p>
           </div>
           <div v-if="sidebar.type === 'ai' && sidebar.mode === 'compose'" class="agent-composer">
+            <p class="agent-caption">选择分析模式（决定产物形态）</p>
+            <div class="goal-presets agent-mode-row">
+              <button
+                  v-for="m in analysisModes"
+                  :key="m.value"
+                  :class="{ active: sidebar.analysisMode === m.value }"
+                  @click="sidebar.analysisMode = m.value"
+              >
+                <strong>{{ m.title }}</strong>
+                <span>{{ m.description }}</span>
+              </button>
+            </div>
             <p class="agent-caption">告诉 Agent 你希望从视频中得到什么产物</p>
             <p v-if="sidebar.error" class="inline-error" role="alert">{{ sidebar.error }}</p>
             <textarea
@@ -903,6 +915,7 @@ const mediaStatusLabel = status => ({
 const {
   sidebar,
   goalPresets,
+  analysisModes,
   traceStages,
   renderedMarkdown,
   transcribe,

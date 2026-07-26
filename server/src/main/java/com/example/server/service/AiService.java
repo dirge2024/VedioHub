@@ -2,12 +2,14 @@ package com.example.server.service;
 
 import com.example.server.dto.AgentFeedback;
 import com.example.server.dto.AgentState;
+import com.example.server.dto.AnalysisMode;
 import com.example.server.dto.TaskStatus;
 import com.example.server.dto.TaskStage;
 import com.example.server.dto.VideoContext;
 import com.example.server.dto.VideoEvidenceHit;
 import com.example.server.entity.MediaFile;
 import com.example.server.mapper.MediaFileMapper;
+import com.example.server.service.mode.ModeRegistry;
 import com.example.server.utils.AnalysisTaskKeys;
 import org.redisson.api.RLock;
 import org.redisson.api.RedissonClient;
@@ -43,6 +45,7 @@ public class AiService {
     private final TaskEventService taskEventService;
     private final RedissonClient redissonClient;
     private final StringRedisTemplate redisTemplate;
+    private final ModeRegistry modeRegistry;
 
     public AiService(MediaFileMapper mediaFileMapper,
                      VideoContextService videoContextService,
@@ -53,7 +56,8 @@ public class AiService {
                      MediaService mediaService,
                      TaskEventService taskEventService,
                      RedissonClient redissonClient,
-                     StringRedisTemplate redisTemplate) {
+                     StringRedisTemplate redisTemplate,
+                     ModeRegistry modeRegistry) {
         this.mediaFileMapper = mediaFileMapper;
         this.videoContextService = videoContextService;
         this.longVideoContextService = longVideoContextService;
@@ -64,9 +68,15 @@ public class AiService {
         this.taskEventService = taskEventService;
         this.redissonClient = redissonClient;
         this.redisTemplate = redisTemplate;
+        this.modeRegistry = modeRegistry;
     }
 
+    /** 兼容旧调用方:未指定模式时按 GENERAL 分析。 */
     public void asyncAnalyze(Long mediaId, String userGoal) {
+        asyncAnalyze(mediaId, userGoal, AnalysisMode.GENERAL);
+    }
+
+    public void asyncAnalyze(Long mediaId, String userGoal, AnalysisMode mode) {
         String traceId = telemetry.start(mediaId, userGoal);
         telemetry.bind(traceId);
         TaskStage currentStage = TaskStage.VIDEO_CONTEXT;
@@ -78,7 +88,9 @@ public class AiService {
         }
 
         try {
-            AgentState agentState = checkpointService.loadResult(mediaId, userGoal);
+            // Checkpoint 键 = (mediaId, goalDigest(goal, mode)):不同模式的同一目标互不串键,
+            // 因此这里带 mode 读取,不会误取别的模式已完成的结果。
+            AgentState agentState = checkpointService.loadResult(mediaId, userGoal, mode);
             if (agentState != null && agentState.result() != null) {
                 persistResult(mediaFile, agentState);
                 telemetry.increment(traceId, "checkpointHits", 1);
@@ -93,7 +105,7 @@ public class AiService {
                     TaskStage.AGENT_LOOP);
             long agentStarted = System.nanoTime();
             try {
-                agentState = agentLoopService.run(mediaId, videoContext);
+                agentState = agentLoopService.run(mediaId, videoContext, modeRegistry.of(mode));
                 telemetry.stage(traceId, TaskStage.AGENT_LOOP.name(), agentStarted, true);
             } catch (RuntimeException e) {
                 telemetry.stage(traceId, TaskStage.AGENT_LOOP.name(), agentStarted, false);
@@ -104,7 +116,7 @@ public class AiService {
                     traceId, mediaId, agentState.round());
         } catch (Exception e) {
             try {
-                checkpointService.saveFailure(mediaId, userGoal, currentStage, e);
+                checkpointService.saveFailure(mediaId, userGoal, mode, currentStage, e);
             } catch (RuntimeException checkpointError) {
                 e.addSuppressed(checkpointError);
                 log.error("agent_failure_checkpoint_write_failed traceId={} mediaId={}",
@@ -290,7 +302,12 @@ public class AiService {
         }
     }
 
+    /** 兼容旧调用方:未指定模式时按 GENERAL 暂存修正。 */
     public void stageRevision(AgentFeedback feedback) {
+        stageRevision(feedback, AnalysisMode.GENERAL);
+    }
+
+    public void stageRevision(AgentFeedback feedback, AnalysisMode mode) {
         AgentFeedback normalized = feedback.normalized();
         checkpointService.saveFeedback(normalized);
 
@@ -300,7 +317,7 @@ public class AiService {
         AgentState.AgentPlan correctedPlan = normalized.correctedTasks().isEmpty()
                 ? null
                 : new AgentState.AgentPlan(goal, normalized.correctedTasks());
-        checkpointService.stageRevision(normalized.mediaId(), goal, correctedPlan);
+        checkpointService.stageRevision(normalized.mediaId(), goal, mode, correctedPlan);
     }
 
     public String revisionGoal(AgentFeedback feedback) {
@@ -311,10 +328,19 @@ public class AiService {
     }
 
     public void cancelStagedRevision(Long mediaId, String goal) {
-        checkpointService.cancelStagedRevision(mediaId, goal);
+        cancelStagedRevision(mediaId, goal, AnalysisMode.GENERAL);
     }
 
+    public void cancelStagedRevision(Long mediaId, String goal, AnalysisMode mode) {
+        checkpointService.cancelStagedRevision(mediaId, goal, mode);
+    }
+
+    /** 兼容旧调用方:未指定模式时按 GENERAL 复用。 */
     public boolean reuseResult(Long mediaId, Long sourceMediaId, AgentState state) {
+        return reuseResult(mediaId, sourceMediaId, state, AnalysisMode.GENERAL);
+    }
+
+    public boolean reuseResult(Long mediaId, Long sourceMediaId, AgentState state, AnalysisMode mode) {
         MediaFile mediaFile = mediaFileMapper.selectById(mediaId);
         if (mediaFile == null) throw new IllegalArgumentException("media does not exist: " + mediaId);
 
@@ -322,7 +348,7 @@ public class AiService {
         if (sourceContext == null) return false;
         checkpointService.saveContext(mediaId, reusableContext(mediaFile.getFilePath(), sourceContext));
         checkpointService.saveResult(mediaId, new AgentState(
-                state.goal(), state.plan(), state.result(), state.critique(), state.round()));
+                state.goal(), state.plan(), state.result(), state.critique(), state.round()), mode);
         persistResult(mediaFile, state);
         return true;
     }

@@ -11,14 +11,22 @@ public class AnalysisTaskMsg implements Serializable {
     private String action;
     private String contentHash;
     private String userGoal;
+    /** 分析模式名(见 {@link AnalysisMode})。可空,历史消息或缺省时按 GENERAL 处理。 */
+    private String mode;
 
     public AnalysisTaskMsg() {}
 
+    /** 兼容旧调用方的四参构造器,模式默认 GENERAL。 */
     public AnalysisTaskMsg(Long mediaId, String action, String contentHash, String userGoal) {
+        this(mediaId, action, contentHash, userGoal, AnalysisMode.GENERAL.name());
+    }
+
+    public AnalysisTaskMsg(Long mediaId, String action, String contentHash, String userGoal, String mode) {
         this.mediaId = mediaId;
         this.action = action;
         this.contentHash = contentHash;
         this.userGoal = userGoal;
+        this.mode = mode;
     }
 
     public Long getMediaId() { return mediaId; }
@@ -29,6 +37,8 @@ public class AnalysisTaskMsg implements Serializable {
     public void setContentHash(String contentHash) { this.contentHash = contentHash; }
     public String getUserGoal() { return userGoal; }
     public void setUserGoal(String userGoal) { this.userGoal = userGoal; }
+    public String getMode() { return mode; }
+    public void setMode(String mode) { this.mode = mode; }
 
     public boolean isRevision() {
         return REVISE_ANALYSIS.equals(action);

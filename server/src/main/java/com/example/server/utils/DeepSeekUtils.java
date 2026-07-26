@@ -2,6 +2,7 @@ package com.example.server.utils;
 
 import com.example.server.dto.AgentState;
 import com.example.server.dto.AnalysisResult;
+import com.example.server.dto.ModeClassification;
 import com.example.server.dto.VideoChunk;
 import com.example.server.dto.VideoContext;
 import com.example.server.dto.VideoRetrievalIntent;
@@ -49,7 +50,12 @@ public class DeepSeekUtils {
         this.outputPricePerMillion = outputPricePerMillion;
     }
 
+    /** 兼容旧调用方:无模式指令 = 通用规划,prompt 与引入模式前逐字节一致。 */
     public AgentState.AgentPlan plan(VideoContext context) {
+        return plan(context, "");
+    }
+
+    public AgentState.AgentPlan plan(VideoContext context, String modeInstruction) {
         try {
             String prompt = """
                     你是 Video Agent 的 Planner。理解用户目标，并拆成 1 到 5 个可执行任务。
@@ -61,7 +67,8 @@ public class DeepSeekUtils {
                       "tasks": ["任务1", "任务2", "任务3"]
                     }
                     VideoContext:
-                    """ + objectMapper.writeValueAsString(context);
+                    """ + objectMapper.writeValueAsString(context)
+                    + modeSuffix("本次分析模式的额外拆解要求：", modeInstruction);
             return structuredChat("PLANNER", prompt, AgentState.AgentPlan.class);
         } catch (Exception e) {
             throw new IllegalStateException("Agent 任务规划失败", e);
@@ -138,6 +145,36 @@ public class DeepSeekUtils {
         }
     }
 
+    /**
+     * 意图路由分类:仅凭用户的分析目标文本,判断最合适的分析模式。
+     *
+     * <p>返回的是{@link ModeClassification 原始字符串结果}而非枚举,把"模型可能返回非法值"
+     * 的不确定性交给上层 {@code ModeRouter} 宽松解析并兜底;本方法只负责发起一次结构化对话。
+     * 分类失败时按既有惯例抛出 {@link IllegalStateException},由调用方决定是否回退。
+     */
+    public ModeClassification classifyMode(String goal) {
+        try {
+            String prompt = """
+                    你是 Video Agent 的意图路由器。根据用户的分析目标,判断最适合的分析模式。
+                    可选模式(mode 字段必须原样返回下列英文名之一):
+                    - GENERAL:通用理解,产出结论、时间戳证据与建议。适合宽泛的"看懂/总结这个视频"。
+                    - LEARNING:学习复习,产出知识点大纲、重点难点、自测题、易错点。适合"学习/复习/做笔记/讲解知识点"。
+                    - REVIEW:内容审查,产出逻辑漏洞、夸大表述、遗漏点、存疑结论。适合"审查/找问题/挑错/核查观点是否站得住"。
+                    - CREATION:内容创作,产出爆点片段、备选标题、简介、口播脚本。适合"剪辑/做短视频/写文案/二次创作"。
+                    判断依据是用户目标的真实意图,而非字面关键词;无法明确归类时一律返回 GENERAL。
+                    只返回 JSON:
+                    {
+                      "mode": "GENERAL",
+                      "reason": "一句话说明为什么选这个模式,不超过 40 字"
+                    }
+                    用户目标:
+                    """ + goal;
+            return structuredChat("MODE_ROUTER", prompt, ModeClassification.class);
+        } catch (Exception e) {
+            throw new IllegalStateException("意图路由分类失败", e);
+        }
+    }
+
     public VideoChunk.ChunkSummary summarizeChunk(List<VideoContext.VideoSegment> segments) {
         try {
             String prompt = """
@@ -155,9 +192,17 @@ public class DeepSeekUtils {
         }
     }
 
+    /** 兼容旧调用方:无模式指令 = 通用执行,prompt 与引入模式前逐字节一致。 */
     public AnalysisResult execute(VideoContext context,
                                   AgentState.AgentPlan plan,
                                   AgentState.CriticResult previousCritique) {
+        return execute(context, plan, previousCritique, "");
+    }
+
+    public AnalysisResult execute(VideoContext context,
+                                  AgentState.AgentPlan plan,
+                                  AgentState.CriticResult previousCritique,
+                                  String modeInstruction) {
         try {
             String prompt = """
                     你是 Video Agent 的 Executor。按照计划分析 VideoContext 并生成结构化产物。
@@ -184,16 +229,25 @@ public class DeepSeekUtils {
                     """ + objectMapper.writeValueAsString(previousCritique) + """
 
                     VideoContext:
-                    """ + objectMapper.writeValueAsString(context);
+                    """ + objectMapper.writeValueAsString(context)
+                    + executeSuffix(modeInstruction);
             return structuredChat("EXECUTOR", prompt, AnalysisResult.class);
         } catch (Exception e) {
             throw new IllegalStateException("Agent 执行失败", e);
         }
     }
 
+    /** 兼容旧调用方:无模式指令 = 通用校验,prompt 与引入模式前逐字节一致。 */
     public AgentState.CriticResult critique(VideoContext context,
                                             AgentState.AgentPlan plan,
                                             AnalysisResult result) {
+        return critique(context, plan, result, "");
+    }
+
+    public AgentState.CriticResult critique(VideoContext context,
+                                            AgentState.AgentPlan plan,
+                                            AnalysisResult result,
+                                            String modeInstruction) {
         try {
             String prompt = """
                     你是 Video Agent 的 Critic，只负责检查，不负责改写产物。
@@ -225,11 +279,34 @@ public class DeepSeekUtils {
                     """ + objectMapper.writeValueAsString(result) + """
 
                     VideoContext:
-                    """ + objectMapper.writeValueAsString(context);
+                    """ + objectMapper.writeValueAsString(context)
+                    + modeSuffix("本次审查模式的额外校验要求：", modeInstruction);
             return structuredChat("CRITIC", prompt, AgentState.CriticResult.class);
         } catch (Exception e) {
             throw new IllegalStateException("Critic 校验失败", e);
         }
+    }
+
+    /**
+     * 通用模式指令后缀。指令为空时返回空串,确保 GENERAL 模式的 prompt 与引入模式体系前逐字节一致;
+     * 非空时以固定前缀追加到 prompt 末尾。
+     */
+    private String modeSuffix(String prefix, String modeInstruction) {
+        return (modeInstruction == null || modeInstruction.isBlank())
+                ? ""
+                : "\n\n" + prefix + modeInstruction;
+    }
+
+    /**
+     * Executor 专用后缀:除追加模式产物要求外,还告知模型在 JSON 中额外输出 sections 数组。
+     * 指令为空时返回空串,GENERAL 产物结构不变。
+     */
+    private String executeSuffix(String modeInstruction) {
+        if (modeInstruction == null || modeInstruction.isBlank()) return "";
+        return "\n\n本次分析模式的额外产物要求：" + modeInstruction
+                + "\n在返回的 JSON 中额外包含一个 \"sections\" 数组,每个元素形如 "
+                + "{\"key\": \"英文标识\", \"title\": \"面向用户的标题\", \"items\": [\"要点\"]};"
+                + "仍需保留 title、conclusions、evidence、suggestions,且这些额外段落也不得虚构、须基于视频内容。";
     }
 
     private <T> T parseJson(String response, Class<T> type) throws Exception {

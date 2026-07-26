@@ -4,6 +4,8 @@ import com.example.server.common.ErrorCode;
 import com.example.server.common.Result;
 import com.example.server.dto.AgentFeedback;
 import com.example.server.dto.AgentState;
+import com.example.server.dto.AnalysisMode;
+import com.example.server.dto.RouteDecision;
 import com.example.server.dto.TaskStatus;
 import com.example.server.dto.VideoEvidenceHit;
 import com.example.server.entity.MediaFile;
@@ -17,6 +19,7 @@ import com.example.server.service.AiService;
 import com.example.server.service.AuthService;
 import com.example.server.service.MediaService;
 import com.example.server.service.TaskEventService;
+import com.example.server.service.mode.ModeRouter;
 import jakarta.validation.Valid;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
@@ -46,6 +49,7 @@ public class AnalysisController {
     private final MediaService mediaService;
     private final TaskEventService taskEventService;
     private final AnalysisStatusService statusService;
+    private final ModeRouter modeRouter;
 
     public AnalysisController(AiService aiService,
                               AnalysisDispatchService dispatchService,
@@ -54,7 +58,8 @@ public class AnalysisController {
                               AgentTelemetry telemetry,
                               MediaService mediaService,
                               TaskEventService taskEventService,
-                              AnalysisStatusService statusService) {
+                              AnalysisStatusService statusService,
+                              ModeRouter modeRouter) {
         this.aiService = aiService;
         this.dispatchService = dispatchService;
         this.checkpointService = checkpointService;
@@ -63,20 +68,38 @@ public class AnalysisController {
         this.mediaService = mediaService;
         this.taskEventService = taskEventService;
         this.statusService = statusService;
+        this.modeRouter = modeRouter;
+    }
+
+    /**
+     * 自动意图路由:仅凭分析目标文本,由 LLM 判定最合适的分析模式。
+     *
+     * <p>路由不依赖具体视频,故不做媒体归属校验;{@code userId} 由拦截器注入,确保仅登录用户可调用。
+     * 返回的 {@link RouteDecision#mode()} 一定是<strong>具体</strong>模式(GENERAL/LEARNING/REVIEW/CREATION),
+     * 前端拿到后即以该模式发起真正的分析请求,使提交、状态查询、重跑共用同一套任务身份 key。
+     * 路由本身永不失败:内部异常会安全回退到 GENERAL。
+     */
+    @GetMapping("/route")
+    public Result<RouteDecision> route(
+            @RequestParam String goal,
+            @RequestAttribute(AuthService.REQUEST_USER_ID) Long userId) {
+        return Result.ok(modeRouter.route(normalizeText(goal, "分析目标")));
     }
 
     @PostMapping("/ai")
     public ResponseEntity<Result<Void>> aiAnalyze(
             @RequestParam Long id,
             @RequestParam(defaultValue = "理解视频核心内容并生成结构化分析报告") String goal,
+            @RequestParam(required = false) String mode,
             @RequestAttribute(AuthService.REQUEST_USER_ID) Long userId) {
         String normalizedGoal = normalizeText(goal, "分析目标");
+        AnalysisMode analysisMode = AnalysisMode.fromNullable(mode);
         MediaFile mediaFile = mediaService.requireOwnedMedia(id, userId);
-        if (checkpointService.loadResult(id, normalizedGoal) != null) {
+        if (checkpointService.loadResult(id, normalizedGoal, analysisMode) != null) {
             // 已有可复用结果，是“已完成”而非“已受理”，用 200 与异步受理区分开。
             return ResponseEntity.ok(Result.ok());
         }
-        return submissionResponse(dispatchService.submit(mediaFile, normalizedGoal, null));
+        return submissionResponse(dispatchService.submit(mediaFile, normalizedGoal, null, analysisMode));
     }
 
     @PostMapping("/follow-up")
@@ -114,11 +137,13 @@ public class AnalysisController {
     @PostMapping("/agent-revise")
     public ResponseEntity<Result<Void>> reviseAgentResult(
             @Valid @RequestBody AgentFeedback feedback,
+            @RequestParam(required = false) String mode,
             @RequestAttribute(AuthService.REQUEST_USER_ID) Long userId) {
         ensureRating(feedback);
         MediaFile mediaFile = mediaService.requireOwnedMedia(feedback.mediaId(), userId);
         String revisedGoal = aiService.revisionGoal(feedback);
-        return submissionResponse(dispatchService.submit(mediaFile, revisedGoal, feedback));
+        return submissionResponse(
+                dispatchService.submit(mediaFile, revisedGoal, feedback, AnalysisMode.fromNullable(mode)));
     }
 
     @GetMapping("/agent-feedback")
@@ -133,19 +158,22 @@ public class AnalysisController {
     public Result<AgentState.AgentPlan> agentPlan(
             @RequestParam Long id,
             @RequestParam String goal,
+            @RequestParam(required = false) String mode,
             @RequestAttribute(AuthService.REQUEST_USER_ID) Long userId) {
         mediaService.requireOwnedMedia(id, userId);
-        return Result.ok(checkpointService.loadPlan(id, normalizeText(goal, "分析目标")));
+        return Result.ok(checkpointService.loadPlan(
+                id, normalizeText(goal, "分析目标"), AnalysisMode.fromNullable(mode)));
     }
 
     @GetMapping("/analysis-status")
     public Result<TaskStatus> analysisStatus(
             @RequestParam Long id,
             @RequestParam String goal,
+            @RequestParam(required = false) String mode,
             @RequestAttribute(AuthService.REQUEST_USER_ID) Long userId) {
         mediaService.requireOwnedMedia(id, userId);
         String normalizedGoal = normalizeText(goal, "分析目标");
-        return Result.ok(statusService.current(id, normalizedGoal));
+        return Result.ok(statusService.current(id, normalizedGoal, AnalysisMode.fromNullable(mode)));
     }
 
     @GetMapping(value = "/analysis-events", produces = MediaType.TEXT_EVENT_STREAM_VALUE)

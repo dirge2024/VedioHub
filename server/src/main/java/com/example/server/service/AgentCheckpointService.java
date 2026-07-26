@@ -2,6 +2,7 @@ package com.example.server.service;
 
 import com.example.server.dto.AgentState;
 import com.example.server.dto.AgentFeedback;
+import com.example.server.dto.AnalysisMode;
 import com.example.server.dto.TaskStage;
 import com.example.server.dto.VideoChunk;
 import com.example.server.dto.VideoContext;
@@ -22,7 +23,14 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
 
-/** 对外只暴露 Agent 领域里的计划、上下文、Critic 和结果 Checkpoint。 */
+/**
+ * 对外只暴露 Agent 领域里的计划、上下文、Critic 和结果 Checkpoint。
+ *
+ * <p>目标级 Checkpoint 的键 = (mediaId, goalDigest(goal, mode))。每个目标级方法都提供
+ * “带 {@link AnalysisMode}” 与 “不带(默认 GENERAL)” 两个重载:前者让不同模式的同一目标互不
+ * 覆盖,后者保证历史调用/遗漏调用安全降级为 GENERAL 且键逐字节不变。上下文、分块、反馈按
+ * mediaId(内容级)存储,与模式无关,不受影响。
+ */
 @Service
 public class AgentCheckpointService {
 
@@ -49,28 +57,48 @@ public class AgentCheckpointService {
     }
 
     public AgentState loadResult(Long mediaId, String goal) {
-        return checkpointRepository.read(mediaId, goalCheckpoint(goal, "result"), goalKey(mediaId, goal),
+        return loadResult(mediaId, goal, AnalysisMode.GENERAL);
+    }
+
+    public AgentState loadResult(Long mediaId, String goal, AnalysisMode mode) {
+        return checkpointRepository.read(mediaId, goalCheckpoint(goal, mode, "result"), goalKey(mediaId, goal, mode),
                 "result", AgentState.class);
     }
 
     public AgentState.AgentPlan loadPlan(Long mediaId, String goal) {
-        return checkpointRepository.read(mediaId, goalCheckpoint(goal, "plan"), goalKey(mediaId, goal),
+        return loadPlan(mediaId, goal, AnalysisMode.GENERAL);
+    }
+
+    public AgentState.AgentPlan loadPlan(Long mediaId, String goal, AnalysisMode mode) {
+        return checkpointRepository.read(mediaId, goalCheckpoint(goal, mode, "plan"), goalKey(mediaId, goal, mode),
                 "plan", AgentState.AgentPlan.class);
     }
 
     public AgentState loadCriticState(Long mediaId, String goal) {
-        return checkpointRepository.read(mediaId, goalCheckpoint(goal, "criticState"), goalKey(mediaId, goal),
+        return loadCriticState(mediaId, goal, AnalysisMode.GENERAL);
+    }
+
+    public AgentState loadCriticState(Long mediaId, String goal, AnalysisMode mode) {
+        return checkpointRepository.read(mediaId, goalCheckpoint(goal, mode, "criticState"), goalKey(mediaId, goal, mode),
                 "criticState", AgentState.class);
     }
 
     public TaskStage loadStage(Long mediaId, String goal) {
+        return loadStage(mediaId, goal, AnalysisMode.GENERAL);
+    }
+
+    public TaskStage loadStage(Long mediaId, String goal, AnalysisMode mode) {
         return checkpointRepository.readStage(
-                mediaId, goalCheckpoint(goal, "stage"), goalKey(mediaId, goal));
+                mediaId, goalCheckpoint(goal, mode, "stage"), goalKey(mediaId, goal, mode));
     }
 
     public void saveStage(Long mediaId, String goal, TaskStage stage) {
-        String key = goalKey(mediaId, goal);
-        checkpointRepository.writeStage(mediaId, goalCheckpoint(goal, "stage"), key, stage);
+        saveStage(mediaId, goal, AnalysisMode.GENERAL, stage);
+    }
+
+    public void saveStage(Long mediaId, String goal, AnalysisMode mode, TaskStage stage) {
+        String key = goalKey(mediaId, goal, mode);
+        checkpointRepository.writeStage(mediaId, goalCheckpoint(goal, mode, "stage"), key, stage);
         rememberGoalKey(mediaId, key);
     }
 
@@ -95,41 +123,63 @@ public class AgentCheckpointService {
     }
 
     public void saveResult(Long mediaId, AgentState state) {
+        saveResult(mediaId, state, AnalysisMode.GENERAL);
+    }
+
+    public void saveResult(Long mediaId, AgentState state, AnalysisMode mode) {
         TaskStage stage = state.critique() != null && state.critique().passed()
                 ? TaskStage.ANALYSIS_COMPLETED : TaskStage.ANALYSIS_COMPLETED_WITH_WARNINGS;
-        String key = goalKey(mediaId, state.goal());
-        checkpointRepository.write(mediaId, goalCheckpoint(state.goal(), "result"), goalCheckpoint(state.goal(), "stage"),
+        String key = goalKey(mediaId, state.goal(), mode);
+        checkpointRepository.write(mediaId, goalCheckpoint(state.goal(), mode, "result"),
+                goalCheckpoint(state.goal(), mode, "stage"),
                 key, "result", stage, state);
         rememberGoalKey(mediaId, key);
     }
 
     public void savePlan(Long mediaId, String goal, AgentState.AgentPlan plan) {
-        String key = goalKey(mediaId, goal);
-        checkpointRepository.write(mediaId, goalCheckpoint(goal, "plan"), goalCheckpoint(goal, "stage"),
+        savePlan(mediaId, goal, AnalysisMode.GENERAL, plan);
+    }
+
+    public void savePlan(Long mediaId, String goal, AnalysisMode mode, AgentState.AgentPlan plan) {
+        String key = goalKey(mediaId, goal, mode);
+        checkpointRepository.write(mediaId, goalCheckpoint(goal, mode, "plan"), goalCheckpoint(goal, mode, "stage"),
                 key, "plan", TaskStage.PLAN_COMPLETED, plan);
         rememberGoalKey(mediaId, key);
     }
 
     public void saveCriticState(Long mediaId, AgentState state) {
+        saveCriticState(mediaId, state, AnalysisMode.GENERAL);
+    }
+
+    public void saveCriticState(Long mediaId, AgentState state, AnalysisMode mode) {
         TaskStage stage = state.critique() != null && state.critique().passed()
                 ? TaskStage.CRITIC_PASSED : TaskStage.CRITIC_RETRY_REQUIRED;
-        String key = goalKey(mediaId, state.goal());
-        checkpointRepository.write(mediaId, goalCheckpoint(state.goal(), "criticState"), goalCheckpoint(state.goal(), "stage"),
+        String key = goalKey(mediaId, state.goal(), mode);
+        checkpointRepository.write(mediaId, goalCheckpoint(state.goal(), mode, "criticState"),
+                goalCheckpoint(state.goal(), mode, "stage"),
                 key, "criticState", stage, state);
         rememberGoalKey(mediaId, key);
     }
 
     public void saveExecutionState(Long mediaId, AgentState state) {
-        String key = goalKey(mediaId, state.goal());
+        saveExecutionState(mediaId, state, AnalysisMode.GENERAL);
+    }
+
+    public void saveExecutionState(Long mediaId, AgentState state, AnalysisMode mode) {
+        String key = goalKey(mediaId, state.goal(), mode);
         checkpointRepository.write(mediaId,
-                goalCheckpoint(state.goal(), "criticState"),
-                goalCheckpoint(state.goal(), "stage"),
+                goalCheckpoint(state.goal(), mode, "criticState"),
+                goalCheckpoint(state.goal(), mode, "stage"),
                 key, "criticState", TaskStage.EXECUTOR_COMPLETED, state);
         rememberGoalKey(mediaId, key);
     }
 
     public void stageRevision(Long mediaId, String goal, AgentState.AgentPlan plan) {
-        String key = revisionKey(mediaId, goal);
+        stageRevision(mediaId, goal, AnalysisMode.GENERAL, plan);
+    }
+
+    public void stageRevision(Long mediaId, String goal, AnalysisMode mode, AgentState.AgentPlan plan) {
+        String key = revisionKey(mediaId, goal, mode);
         try {
             redisTemplate.opsForHash().put(key, "pending", "1");
             if (plan != null) {
@@ -142,15 +192,19 @@ public class AgentCheckpointService {
         }
     }
 
-    @Transactional
     public boolean beginStagedRevision(Long mediaId, String goal) {
-        String revisionKey = revisionKey(mediaId, goal);
+        return beginStagedRevision(mediaId, goal, AnalysisMode.GENERAL);
+    }
+
+    @Transactional
+    public boolean beginStagedRevision(Long mediaId, String goal, AnalysisMode mode) {
+        String revisionKey = revisionKey(mediaId, goal, mode);
         if (!Boolean.TRUE.equals(redisTemplate.hasKey(revisionKey))) return false;
 
         AgentState.AgentPlan plan = readRevisionPlan(revisionKey);
-        checkpointRepository.deleteByPrefix(mediaId, goalCheckpoint(goal, ""));
-        redisTemplate.delete(goalKey(mediaId, goal));
-        if (plan != null) savePlan(mediaId, goal, plan);
+        checkpointRepository.deleteByPrefix(mediaId, goalCheckpoint(goal, mode, ""));
+        redisTemplate.delete(goalKey(mediaId, goal, mode));
+        if (plan != null) savePlan(mediaId, goal, mode, plan);
         TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
             @Override
             public void afterCommit() {
@@ -165,7 +219,11 @@ public class AgentCheckpointService {
     }
 
     public void cancelStagedRevision(Long mediaId, String goal) {
-        redisTemplate.delete(revisionKey(mediaId, goal));
+        cancelStagedRevision(mediaId, goal, AnalysisMode.GENERAL);
+    }
+
+    public void cancelStagedRevision(Long mediaId, String goal, AnalysisMode mode) {
+        redisTemplate.delete(revisionKey(mediaId, goal, mode));
     }
 
     public void saveFeedback(AgentFeedback feedback) {
@@ -193,9 +251,13 @@ public class AgentCheckpointService {
     }
 
     public void saveFailure(Long mediaId, String goal, TaskStage failedStage, Exception error) {
-        String key = goalKey(mediaId, goal);
+        saveFailure(mediaId, goal, AnalysisMode.GENERAL, failedStage, error);
+    }
+
+    public void saveFailure(Long mediaId, String goal, AnalysisMode mode, TaskStage failedStage, Exception error) {
+        String key = goalKey(mediaId, goal, mode);
         checkpointRepository.writeStage(
-                mediaId, goalCheckpoint(goal, "stage"), key, TaskStage.FAILED);
+                mediaId, goalCheckpoint(goal, mode, "stage"), key, TaskStage.FAILED);
         redisTemplate.opsForHash().put(key, "failedStage", failedStage.name());
         redisTemplate.opsForHash().put(key, "errorType", error.getClass().getSimpleName());
         redisTemplate.expire(key, Duration.ofDays(7));
@@ -241,16 +303,16 @@ public class AgentCheckpointService {
         return "agent:checkpoint:" + mediaId;
     }
 
-    private String goalKey(Long mediaId, String goal) {
-        return checkpointKey(mediaId) + ":goal:" + AnalysisTaskKeys.goalDigest(goal);
+    private String goalKey(Long mediaId, String goal, AnalysisMode mode) {
+        return checkpointKey(mediaId) + ":goal:" + AnalysisTaskKeys.goalDigest(goal, mode);
     }
 
     private String feedbackKey(Long mediaId) {
         return "agent:feedback:" + mediaId;
     }
 
-    private String revisionKey(Long mediaId, String goal) {
-        return goalKey(mediaId, goal) + ":revision";
+    private String revisionKey(Long mediaId, String goal, AnalysisMode mode) {
+        return goalKey(mediaId, goal, mode) + ":revision";
     }
 
     private String goalIndexKey(Long mediaId) {
@@ -261,7 +323,7 @@ public class AgentCheckpointService {
         return "media:" + field;
     }
 
-    private String goalCheckpoint(String goal, String field) {
-        return "goal:" + AnalysisTaskKeys.goalDigest(goal) + ":" + field;
+    private String goalCheckpoint(String goal, AnalysisMode mode, String field) {
+        return "goal:" + AnalysisTaskKeys.goalDigest(goal, mode) + ":" + field;
     }
 }

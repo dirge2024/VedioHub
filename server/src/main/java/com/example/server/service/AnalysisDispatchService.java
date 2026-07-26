@@ -1,6 +1,7 @@
 package com.example.server.service;
 
 import com.example.server.dto.AgentFeedback;
+import com.example.server.dto.AnalysisMode;
 import com.example.server.dto.AnalysisTaskMsg;
 import com.example.server.dto.TaskStatus;
 import com.example.server.dto.TaskStage;
@@ -52,13 +53,18 @@ public class AnalysisDispatchService {
         this.analysisTopic = analysisTopic;
     }
 
+    /** 兼容旧调用方:未指定模式时按 GENERAL 提交。 */
     public SubmissionResult submit(MediaFile mediaFile, String goal, AgentFeedback revision) {
+        return submit(mediaFile, goal, revision, AnalysisMode.GENERAL);
+    }
+
+    public SubmissionResult submit(MediaFile mediaFile, String goal, AgentFeedback revision, AnalysisMode mode) {
         Long mediaId = mediaFile.getId();
         String action = revision == null
                 ? AnalysisTaskMsg.START_ANALYSIS
                 : AnalysisTaskMsg.REVISE_ANALYSIS;
         String contentHash = revision == null ? contentHash(mediaId) : "media-" + mediaId;
-        String goalDigest = AnalysisTaskKeys.goalDigest(goal);
+        String goalDigest = AnalysisTaskKeys.goalDigest(goal, mode);
         String activeKey = AnalysisTaskKeys.active(contentHash, goalDigest);
         Boolean accepted = redisTemplate.opsForValue().setIfAbsent(
                 activeKey, String.valueOf(mediaId), ACTIVE_TTL);
@@ -70,13 +76,14 @@ public class AnalysisDispatchService {
                 return SubmissionResult.RATE_LIMITED;
             }
             // 旧结果先留着。消费者真正接手后再切 Checkpoint，MQ 投递失败时用户还有结果可看。
-            if (revision != null) aiService.stageRevision(revision);
+            if (revision != null) aiService.stageRevision(revision, mode);
             rocketMQTemplate.convertAndSend(
                     analysisTopic,
-                    new AnalysisTaskMsg(mediaId, action, contentHash, goal));
+                    new AnalysisTaskMsg(mediaId, action, contentHash, goal,
+                            (mode == null ? AnalysisMode.GENERAL : mode).name()));
         } catch (RuntimeException e) {
             redisTemplate.delete(activeKey);
-            if (revision != null) aiService.cancelStagedRevision(mediaId, goal);
+            if (revision != null) aiService.cancelStagedRevision(mediaId, goal, mode);
             log.error("analysis_dispatch_failed mediaId={} userId={}", mediaId, mediaFile.getUserId(), e);
             return SubmissionResult.FAILED;
         }
@@ -93,7 +100,11 @@ public class AnalysisDispatchService {
     }
 
     public boolean isActive(Long mediaId, String goal) {
-        String goalDigest = AnalysisTaskKeys.goalDigest(goal);
+        return isActive(mediaId, goal, AnalysisMode.GENERAL);
+    }
+
+    public boolean isActive(Long mediaId, String goal, AnalysisMode mode) {
+        String goalDigest = AnalysisTaskKeys.goalDigest(goal, mode);
         return Boolean.TRUE.equals(redisTemplate.hasKey(
                 AnalysisTaskKeys.active(contentHash(mediaId), goalDigest)))
                 || Boolean.TRUE.equals(redisTemplate.hasKey(

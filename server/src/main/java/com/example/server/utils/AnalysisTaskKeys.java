@@ -49,4 +49,20 @@ public final class AnalysisTaskKeys {
     public static String attempts(String contentScope, String goalDigest) {
         return "analysis:attempts:" + contentScope + ":" + goalDigest;
     }
+
+    /**
+     * 内容级预处理的归属键：记录哪个 mediaId already 产出过该内容的 VideoContext。
+     * ASR/OCR 只取决于视频内容本身，与用户目标无关，因此按 contentHash 而非 goal 复用。
+     */
+    public static String contextOwner(String contentHash) {
+        return "analysis:context-owner:" + contentHash;
+    }
+
+    /**
+     * 内容级预处理锁：同一视频被不同目标同时提交时，只允许一个消费者真正跑 ASR/OCR，
+     * 其余等待后直接复用，避免重复烧算力与第三方额度。
+     */
+    public static String contextLock(String contentHash) {
+        return "lock:analysis-context:" + contentHash;
+    }
 }

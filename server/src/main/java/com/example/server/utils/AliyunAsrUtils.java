@@ -43,7 +43,10 @@ public class AliyunAsrUtils {
 
     public String audioToText(String filePath) {
         File file = new File(filePath);
-        if (!file.isFile()) throw new IllegalArgumentException("ASR audio file does not exist");
+        // 这里的音频是本流水线上一步用 ffmpeg 切出来的，缺失属于「意外状态」而非「调用方参数错误」，
+        // 重跑流水线可以重新生成，因此用 IllegalStateException 保持它可重试，
+        // 不要和下面表示「请求本身不合法、重试无意义」的 IllegalArgumentException 混用。
+        if (!file.isFile()) throw new IllegalStateException("ASR audio file does not exist");
 
         Exception lastError = null;
         for (int attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
@@ -82,7 +85,9 @@ public class AliyunAsrUtils {
             if (response.code() == 429 || response.code() >= 500) {
                 throw new RetryableAsrException("ASR transient HTTP " + response.code());
             }
-            throw new IllegalStateException("ASR request rejected with HTTP " + response.code());
+            // 非 429/5xx 的失败源于请求本身（参数、鉴权、音频格式不支持），重投多少次都不会变好。
+            // 用 IllegalArgumentException 让上层能识别为「不可重试」，避免整条流水线空转重试。
+            throw new IllegalArgumentException("ASR request rejected with HTTP " + response.code());
         }
     }
 

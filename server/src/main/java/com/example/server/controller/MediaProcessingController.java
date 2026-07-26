@@ -1,8 +1,11 @@
 package com.example.server.controller;
 
+import com.example.server.common.ErrorCode;
+import com.example.server.common.Result;
 import com.example.server.dto.TaskStatus;
 import com.example.server.dto.TaskStage;
 import com.example.server.entity.MediaFile;
+import com.example.server.exception.BusinessException;
 import com.example.server.service.AudioExportService;
 import com.example.server.service.AuthService;
 import com.example.server.service.MediaService;
@@ -11,7 +14,6 @@ import com.example.server.service.TranscriptionTaskService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpHeaders;
-import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -50,29 +52,31 @@ public class MediaProcessingController {
     }
 
     @PostMapping("/transcribe")
-    public ResponseEntity<String> transcribe(
+    public ResponseEntity<Result<Void>> transcribe(
             @RequestParam Long id,
             @RequestAttribute(AuthService.REQUEST_USER_ID) Long userId) {
         mediaService.requireOwnedMedia(id, userId);
         if (!transcriptionTaskService.queue(id)) {
-            return ResponseEntity.status(HttpStatus.CONFLICT).body("文字提取任务正在处理中");
+            throw new BusinessException(ErrorCode.CONFLICT, "文字提取任务正在处理中");
         }
         try {
             transcriptionTaskService.transcribe(id);
         } catch (RuntimeException e) {
+            // 派发失败要回滚“已排队”标记，避免任务卡在处理中；这是真实的补偿逻辑，予以保留。
             transcriptionTaskService.rejectQueued(id);
             log.warn("transcription_dispatch_rejected mediaId={} userId={}", id, userId, e);
-            return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).body("任务队列已满，请稍后重试");
+            throw new BusinessException(ErrorCode.SERVICE_UNAVAILABLE, "任务队列已满，请稍后重试");
         }
-        return ResponseEntity.status(HttpStatus.ACCEPTED).body("提取任务已提交");
+        // 异步受理：202 Accepted，结果由 transcription-status / SSE 获取。
+        return ResponseEntity.accepted().body(Result.ok());
     }
 
     @GetMapping("/transcription-status")
-    public TaskStatus transcriptionStatus(
+    public Result<TaskStatus> transcriptionStatus(
             @RequestParam Long id,
             @RequestAttribute(AuthService.REQUEST_USER_ID) Long userId) {
         MediaFile mediaFile = mediaService.requireOwnedMedia(id, userId);
-        return transcriptionTaskService.status(mediaFile);
+        return Result.ok(transcriptionTaskService.status(mediaFile));
     }
 
     @GetMapping(value = "/transcription-events", produces = MediaType.TEXT_EVENT_STREAM_VALUE)

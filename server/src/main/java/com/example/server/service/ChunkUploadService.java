@@ -1,6 +1,8 @@
 package com.example.server.service;
 
+import com.example.server.common.ErrorCode;
 import com.example.server.entity.MediaFile;
+import com.example.server.exception.BusinessException;
 import com.example.server.utils.MinioUtils;
 import org.redisson.api.RLock;
 import org.redisson.api.RedissonClient;
@@ -111,7 +113,11 @@ public class ChunkUploadService {
     public MediaFile complete(String uploadId, Long userId) throws Exception {
         validateUploadId(uploadId);
         RLock mergeLock = redissonClient.getLock("lock:upload:merge:" + uploadId);
-        if (!mergeLock.tryLock()) throw new IllegalStateException("upload is already being merged");
+        // 这两种情况是客户端可重试的“状态冲突”，不是服务端故障：用 BusinessException 标成 409，
+        // 避免和本类中真正的内部错误（如 md5Digest 的 IllegalStateException）混在一起被兜底成 500。
+        if (!mergeLock.tryLock()) {
+            throw new BusinessException(ErrorCode.CONFLICT, "该上传任务正在合并中，请稍后重试");
+        }
 
         try {
             MediaFile completed = completedUpload(uploadId, userId);
@@ -122,7 +128,8 @@ public class ChunkUploadService {
             int totalChunks = Integer.parseInt(String.valueOf(metadata.get("totalChunks")));
             Set<Integer> uploadedChunks = uploadedChunks(uploadId, userId);
             if (uploadedChunks.size() != totalChunks) {
-                throw new IllegalStateException("not all chunks have been uploaded");
+                throw new BusinessException(ErrorCode.CONFLICT,
+                        "分片尚未全部上传完成（已传 " + uploadedChunks.size() + "/" + totalChunks + "）");
             }
 
             Path mergedFile = Files.createTempFile("dovideo-merged-", fileSuffix(filename));

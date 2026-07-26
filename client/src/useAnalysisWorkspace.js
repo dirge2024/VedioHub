@@ -38,6 +38,9 @@ function createSidebarState() {
     content: '',
     error: '',
     loading: false,
+    statusMessage: '',
+    streamOffline: false,
+    streamRetry: 0,
     mediaId: null,
     goal: DEFAULT_GOAL,
     playbackUrl: '',
@@ -65,7 +68,8 @@ export function useAnalysisWorkspace({
   taskStreams,
   showMessage,
   refreshMediaList,
-  findMediaItem
+  findMediaItem,
+  onAnswerAppended = () => {}
 }) {
   const sidebar = ref(createSidebarState())
   let evidenceRequestVersion = 0
@@ -82,6 +86,10 @@ export function useAnalysisWorkspace({
     sidebar.value.title = title
     sidebar.value.loading = true
     sidebar.value.content = ''
+    sidebar.value.error = ''
+    sidebar.value.statusMessage = ''
+    sidebar.value.streamOffline = false
+    sidebar.value.streamRetry = 0
   }
 
   const closeSidebar = () => {
@@ -134,15 +142,28 @@ export function useAnalysisWorkspace({
     const scope = type === 'ai' ? goal : ''
     const isCurrentTask = () => isCurrentWorkspace(
       id, type, type === 'ai' ? goal : null)
+    const taskLabel = type === 'ai' ? 'AI 分析' : '文字提取'
     const finish = async (result, failed = false) => {
-      if (sidebar.value.visible && isCurrentTask()) {
-        sidebar.value.content = failed && type === 'ai' ? '' : result
+      const watching = sidebar.value.visible && isCurrentTask()
+      if (watching) {
+        sidebar.value.content = failed ? '' : result
         sidebar.value.loading = false
-        sidebar.value.error = failed && type === 'ai' ? result : ''
+        sidebar.value.statusMessage = ''
+        sidebar.value.streamOffline = false
+        sidebar.value.streamRetry = 0
+        sidebar.value.error = failed ? result : ''
         if (failed && type === 'ai') sidebar.value.mode = 'compose'
         if (type === 'ai' && !failed) await refreshAgentMeta(id, goal, true)
       }
-      showMessage(failed ? '任务执行失败，请稍后重试' : '任务完成', failed)
+      // 用户可能已经关掉面板去看别的视频，带上文件名才知道是哪个任务结束了。
+      const filename = watching ? '' : findMediaItem(id)?.filename || ''
+      const suffix = filename ? ` · ${filename}` : ''
+      showMessage(
+        failed
+          ? `${taskLabel}失败${suffix}：${result || '请稍后重试'}`
+          : `${taskLabel}完成${suffix}`,
+        failed
+      )
       taskStreams.stop(id, type, scope)
     }
 
@@ -153,10 +174,13 @@ export function useAnalysisWorkspace({
       : `/analysis/transcription-events?${params}`
 
     taskStreams.start(id, type, scope, path, async status => {
-      if (isCurrentTask() && status.message) {
-        sidebar.value.content = status.state === 'PROCESSING' || status.state === 'QUEUED'
-          ? status.message
-          : sidebar.value.content
+      if (isCurrentTask()) {
+        // 收到任何事件都说明连接是通的，先把“重连中”提示撤掉。
+        sidebar.value.streamOffline = false
+        sidebar.value.streamRetry = 0
+        if (status.message && (status.state === 'PROCESSING' || status.state === 'QUEUED')) {
+          sidebar.value.statusMessage = status.message
+        }
       }
       if (type === 'ai' && status.stage && isCurrentTask()) {
         await refreshAgentMeta(id, goal, false)
@@ -167,8 +191,21 @@ export function useAnalysisWorkspace({
       } else if (status.state === 'FAILED') {
         await finish(status.message || '任务执行失败', true)
       }
-    }, error => {
+    }, (error, attempt, terminal = false) => {
+      // isCurrentTask 保证用户已切换视频或关闭面板时，旧任务的错误不会写到新页面上。
+      if (terminal) {
+        console.warn('task event stream stopped', error)
+        if (!isCurrentTask()) return
+        sidebar.value.streamOffline = false
+        sidebar.value.streamRetry = 0
+        sidebar.value.loading = false
+        sidebar.value.error = error?.message || '任务事件流已断开，请稍后重试'
+        return
+      }
       console.warn('task event stream reconnecting', error)
+      if (!isCurrentTask()) return
+      sidebar.value.streamOffline = true
+      sidebar.value.streamRetry = attempt || 1
     })
   }
 
@@ -180,16 +217,17 @@ export function useAnalysisWorkspace({
       sidebar.value.loading = false
       return
     }
+    const panelTitle = item?.filename ? `全量文字提取 · ${item.filename}` : '全量文字提取'
     if (taskStreams.has(id, 'text')) {
-      openSidebar('text', '全量文字提取')
+      openSidebar('text', panelTitle)
       sidebar.value.mediaId = id
-      sidebar.value.content = '📝 文字提取正在后台进行中...'
+      sidebar.value.statusMessage = '文字提取正在后台继续，进度会自动同步'
       return
     }
 
-    openSidebar('text', '全量文字提取')
+    openSidebar('text', panelTitle)
     sidebar.value.mediaId = id
-    sidebar.value.content = '📝 提取任务已提交，正在识别语音流...'
+    sidebar.value.statusMessage = '提取任务已提交，正在识别语音'
     try {
       const current = await apiRequest(`/analysis/transcription-status?id=${id}`)
       if (!current.ok) throw new Error(await current.text())
@@ -197,11 +235,15 @@ export function useAnalysisWorkspace({
       if (currentStatus.state === 'COMPLETED') {
         if (isCurrentWorkspace(id, 'text')) {
           sidebar.value.content = currentStatus.result || ''
+          sidebar.value.statusMessage = ''
           sidebar.value.loading = false
         }
         return
       }
       if (currentStatus.state === 'QUEUED' || currentStatus.state === 'PROCESSING') {
+        if (isCurrentWorkspace(id, 'text') && currentStatus.message) {
+          sidebar.value.statusMessage = currentStatus.message
+        }
         startTaskStream(id, 'text')
         return
       }
@@ -210,7 +252,9 @@ export function useAnalysisWorkspace({
       startTaskStream(id, 'text')
     } catch (error) {
       if (isCurrentWorkspace(id, 'text')) {
-        sidebar.value.content = error.message || '文字提取失败，请稍后重试'
+        sidebar.value.content = ''
+        sidebar.value.statusMessage = ''
+        sidebar.value.error = error.message || '文字提取失败，请稍后重试'
         sidebar.value.loading = false
       }
     }
@@ -220,12 +264,16 @@ export function useAnalysisWorkspace({
     if (taskStreams.has(id, 'ai', goal)) {
       sidebar.value.mode = 'result'
       sidebar.value.loading = true
+      sidebar.value.statusMessage = '这个目标已有分析在进行，正在接管进度'
       return
     }
 
     sidebar.value.loading = true
     sidebar.value.mode = 'result'
     sidebar.value.content = ''
+    sidebar.value.statusMessage = '任务已提交，正在排队进入 Agent 流水线'
+    sidebar.value.streamOffline = false
+    sidebar.value.streamRetry = 0
     try {
       const params = new URLSearchParams({ id: String(id), goal })
       const response = await apiRequest(`/analysis/ai?${params}`, { method: 'POST' })
@@ -239,6 +287,7 @@ export function useAnalysisWorkspace({
         if (isCurrentWorkspace(id, 'ai', goal)) {
           showMessage(message, true)
           sidebar.value.loading = false
+          sidebar.value.statusMessage = ''
           sidebar.value.mode = 'compose'
           sidebar.value.error = message
         }
@@ -251,6 +300,7 @@ export function useAnalysisWorkspace({
         sidebar.value.mode = 'compose'
         sidebar.value.error = error.message || String(error)
         sidebar.value.loading = false
+        sidebar.value.statusMessage = ''
       }
     }
   }
@@ -286,7 +336,7 @@ export function useAnalysisWorkspace({
       } else if (status.state === 'QUEUED' || status.state === 'PROCESSING') {
         sidebar.value.mode = 'result'
         sidebar.value.loading = true
-        sidebar.value.content = status.message || '正在恢复分析任务...'
+        sidebar.value.statusMessage = status.message || '正在恢复上一次未完成的分析任务'
         startTaskStream(item.id, 'ai', goal)
         await refreshAgentMeta(item.id, goal, false)
       } else if (status.state === 'FAILED') {
@@ -311,7 +361,7 @@ export function useAnalysisWorkspace({
 
   const submitAgent = () => {
     const goal = sidebar.value.goal.trim()
-    if (!goal) return
+    if (!goal || sidebar.value.loading) return
     sidebar.value.error = ''
     saveGoalDraft(sidebar.value.mediaId, goal)
     if (demoMode) {
@@ -384,6 +434,9 @@ export function useAnalysisWorkspace({
         cancelPlanEdit()
         sidebar.value.content = ''
         sidebar.value.loading = true
+        sidebar.value.statusMessage = '已按新计划重新提交，正在重新执行'
+        sidebar.value.streamOffline = false
+        sidebar.value.streamRetry = 0
       }
       startTaskStream(mediaId, 'ai', goal)
     } catch (error) {
@@ -397,10 +450,11 @@ export function useAnalysisWorkspace({
 
   const submitFollowUp = async () => {
     const question = sidebar.value.followUp.trim()
-    if (!question) return
+    if (!question || sidebar.value.followUpLoading) return
     if (demoMode) {
       sidebar.value.content += `\n\n## 追问\n${question}\n\n根据 08:42 的讲解，迭代写法使用显式栈保存待访问节点，时间复杂度仍为 O(n)，额外空间复杂度为 O(h)。`
       sidebar.value.followUp = ''
+      onAnswerAppended()
       return
     }
 
@@ -419,6 +473,8 @@ export function useAnalysisWorkspace({
       if (isCurrentWorkspace(mediaId, 'ai', goal)) {
         sidebar.value.content += `\n\n## 追问\n${question}\n\n${answer}`
         sidebar.value.followUp = ''
+        // 答案追加在长文末尾，主动带用户滚过去，否则会以为“点了没反应”。
+        onAnswerAppended()
       }
     } catch (error) {
       if (isCurrentWorkspace(mediaId, 'ai', goal)) {

@@ -40,6 +40,7 @@ public class SegmentedTranscriptionService {
 
         List<TranscriptSegment> result = new ArrayList<>();
         int failedSegments = 0;
+        RuntimeException lastSegmentError = null;
         for (int i = 0; i < audioFiles.size(); i++) {
             Path audioFile = audioFiles.get(i);
             try {
@@ -50,12 +51,16 @@ public class SegmentedTranscriptionService {
                 }
             } catch (RuntimeException e) {
                 failedSegments++;
+                lastSegmentError = e;
                 telemetry.increment(traceId, "asrSegmentFailures", 1);
                 log.warn("asr_segment_failed segment={} file={}", i, audioFile.getFileName(), e);
             }
         }
         if (result.isEmpty() && failedSegments > 0) {
-            throw new IllegalStateException("所有 ASR 分片均处理失败");
+            // 必须带上 cause：AliyunAsrUtils 已经区分了「429/5xx 可重试」与「4xx 请求本身有问题」，
+            // 这里若丢掉原因，消费者只能看到一个笼统的 IllegalStateException，
+            // 于是参数错误也会被当成抖动反复重试整条 ASR+LLM 流水线。
+            throw new IllegalStateException("所有 ASR 分片均处理失败", lastSegmentError);
         }
         return result;
     }

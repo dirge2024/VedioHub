@@ -1,15 +1,12 @@
 package com.example.server.controller;
 
+import com.example.server.common.Result;
 import com.example.server.dto.MediaSummary;
 import com.example.server.entity.MediaFile;
 import com.example.server.service.AuthService;
 import com.example.server.service.ChunkUploadService;
 import com.example.server.service.MediaIngestService;
 import com.example.server.service.MediaService;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-import org.springframework.http.HttpStatus;
-import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -26,8 +23,6 @@ import java.util.Set;
 @RequestMapping("/media")
 public class MediaController {
 
-    private static final Logger log = LoggerFactory.getLogger(MediaController.class);
-
     private final ChunkUploadService chunkUploadService;
     private final MediaIngestService mediaIngestService;
     private final MediaService mediaService;
@@ -40,107 +35,71 @@ public class MediaController {
         this.mediaService = mediaService;
     }
 
+    // 说明：下列方法上的 throws 源于 service 层声明了受检异常（throws Exception/IOException）。
+    // 受检异常必须在编译期被处理，而 @RestControllerAdvice 只在运行期兜底，故此处显式向上抛出，
+    // 由全局异常处理器统一转成 Result。更彻底的做法是收敛 service 的受检异常签名（留待 service 批次）。
     @PostMapping("/init-upload")
-    public ResponseEntity<String> initUpload(@RequestParam String filename,
-                                             @RequestParam int totalChunks,
-                                             @RequestAttribute(AuthService.REQUEST_USER_ID) Long userId) {
-        try {
-            return ResponseEntity.ok(chunkUploadService.initialize(filename, totalChunks, userId));
-        } catch (IllegalArgumentException e) {
-            return ResponseEntity.badRequest().body(e.getMessage());
-        } catch (Exception e) {
-            log.error("chunk_upload_init_failed userId={}", userId, e);
-            return ResponseEntity.internalServerError().body("Failed to initialize upload");
-        }
+    public Result<String> initUpload(@RequestParam String filename,
+                                     @RequestParam int totalChunks,
+                                     @RequestAttribute(AuthService.REQUEST_USER_ID) Long userId) throws Exception {
+        return Result.ok(chunkUploadService.initialize(filename, totalChunks, userId));
     }
 
     @GetMapping("/upload-status")
-    public ResponseEntity<Set<Integer>> uploadStatus(
+    public Result<Set<Integer>> uploadStatus(
             @RequestParam String uploadId,
             @RequestAttribute(AuthService.REQUEST_USER_ID) Long userId) {
-        return ResponseEntity.ok(chunkUploadService.uploadedChunks(uploadId, userId));
+        return Result.ok(chunkUploadService.uploadedChunks(uploadId, userId));
     }
 
     @PostMapping("/upload-chunk")
-    public ResponseEntity<String> uploadChunk(@RequestParam String uploadId,
-                                              @RequestParam int chunkIndex,
-                                              @RequestParam int totalChunks,
-                                              @RequestParam("file") MultipartFile file,
-                                              @RequestAttribute(AuthService.REQUEST_USER_ID) Long userId) {
-        try {
-            chunkUploadService.uploadChunk(uploadId, chunkIndex, totalChunks, file, userId);
-            return ResponseEntity.ok("Chunk uploaded");
-        } catch (SecurityException e) {
-            return ResponseEntity.status(HttpStatus.FORBIDDEN).body(e.getMessage());
-        } catch (IllegalArgumentException e) {
-            return ResponseEntity.badRequest().body(e.getMessage());
-        } catch (Exception e) {
-            log.error("chunk_upload_failed uploadId={} chunkIndex={}", uploadId, chunkIndex, e);
-            return ResponseEntity.internalServerError().body("Chunk upload failed");
-        }
+    public Result<Void> uploadChunk(@RequestParam String uploadId,
+                                    @RequestParam int chunkIndex,
+                                    @RequestParam int totalChunks,
+                                    @RequestParam("file") MultipartFile file,
+                                    @RequestAttribute(AuthService.REQUEST_USER_ID) Long userId) throws Exception {
+        chunkUploadService.uploadChunk(uploadId, chunkIndex, totalChunks, file, userId);
+        return Result.ok();
     }
 
     @PostMapping("/complete-upload")
-    public ResponseEntity<?> completeUpload(
+    public Result<MediaSummary> completeUpload(
             @RequestParam String uploadId,
-            @RequestAttribute(AuthService.REQUEST_USER_ID) Long userId) {
-        try {
-            MediaFile mediaFile = chunkUploadService.complete(uploadId, userId);
-            return ResponseEntity.ok(MediaSummary.from(mediaFile));
-        } catch (SecurityException e) {
-            return ResponseEntity.status(HttpStatus.FORBIDDEN).body(e.getMessage());
-        } catch (IllegalArgumentException | IllegalStateException e) {
-            return ResponseEntity.badRequest().body(e.getMessage());
-        } catch (Exception e) {
-            log.error("chunk_merge_failed uploadId={}", uploadId, e);
-            return ResponseEntity.internalServerError().body("Upload merge failed");
-        }
+            @RequestAttribute(AuthService.REQUEST_USER_ID) Long userId) throws Exception {
+        return Result.ok(MediaSummary.from(chunkUploadService.complete(uploadId, userId)));
     }
 
     @PostMapping("/upload")
-    public ResponseEntity<?> upload(@RequestParam("file") MultipartFile file,
-                                    @RequestAttribute(AuthService.REQUEST_USER_ID) Long userId) {
-        try {
-            MediaFile mediaFile = mediaIngestService.ingestFile(file, userId);
-            return ResponseEntity.ok(MediaSummary.from(mediaFile));
-        } catch (IllegalArgumentException e) {
-            return ResponseEntity.badRequest().body(e.getMessage());
-        } catch (Exception e) {
-            log.error("media_upload_failed userId={} filename={}", userId, file.getOriginalFilename(), e);
-            return ResponseEntity.internalServerError().body("Upload failed");
-        }
+    public Result<MediaSummary> upload(@RequestParam("file") MultipartFile file,
+                                       @RequestAttribute(AuthService.REQUEST_USER_ID) Long userId) throws Exception {
+        return Result.ok(MediaSummary.from(mediaIngestService.ingestFile(file, userId)));
     }
 
     @PostMapping("/upload-url")
-    public ResponseEntity<?> uploadUrl(@RequestParam("url") String url,
-                                       @RequestAttribute(AuthService.REQUEST_USER_ID) Long userId) {
-        try {
-            MediaFile mediaFile = mediaIngestService.ingestUrl(url, userId);
-            return ResponseEntity.ok(MediaSummary.from(mediaFile));
-        } catch (IllegalArgumentException e) {
-            return ResponseEntity.badRequest().body(e.getMessage());
-        } catch (Exception e) {
-            log.error("url_upload_failed userId={}", userId, e);
-            return ResponseEntity.internalServerError().body("Upload failed");
-        }
+    public Result<MediaSummary> uploadUrl(@RequestParam("url") String url,
+                                          @RequestAttribute(AuthService.REQUEST_USER_ID) Long userId) throws Exception {
+        return Result.ok(MediaSummary.from(mediaIngestService.ingestUrl(url, userId)));
     }
 
     @GetMapping("/list")
-    public List<MediaSummary> getList(@RequestAttribute(AuthService.REQUEST_USER_ID) Long userId) {
-        return mediaService.listByUser(userId).stream().map(MediaSummary::from).toList();
+    public Result<List<MediaSummary>> getList(
+            @RequestAttribute(AuthService.REQUEST_USER_ID) Long userId) {
+        return Result.ok(mediaService.listByUser(userId).stream()
+                .map(MediaSummary::from)
+                .toList());
     }
 
     @GetMapping("/playback")
-    public ResponseEntity<String> playback(@RequestParam Long id,
-                                           @RequestAttribute(AuthService.REQUEST_USER_ID) Long userId) {
+    public Result<String> playback(@RequestParam Long id,
+                                   @RequestAttribute(AuthService.REQUEST_USER_ID) Long userId) {
         MediaFile mediaFile = mediaService.requireOwnedMedia(id, userId);
-        return ResponseEntity.ok(mediaService.readableSource(mediaFile.getFilePath()));
+        return Result.ok(mediaService.readableSource(mediaFile.getFilePath()));
     }
 
     @DeleteMapping("/delete")
-    public ResponseEntity<String> delete(@RequestParam("id") Long id,
-                                         @RequestAttribute(AuthService.REQUEST_USER_ID) Long userId) {
+    public Result<Void> delete(@RequestParam("id") Long id,
+                               @RequestAttribute(AuthService.REQUEST_USER_ID) Long userId) {
         mediaService.deleteOwnedMedia(id, userId);
-        return ResponseEntity.ok("删除成功");
+        return Result.ok();
     }
 }

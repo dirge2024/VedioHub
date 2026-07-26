@@ -1,9 +1,9 @@
 package com.example.server.controller;
 
-import com.example.server.entity.FailedAnalysisTask;
+import com.example.server.common.Result;
+import com.example.server.dto.FailedTaskView;
 import com.example.server.service.AuthService;
 import com.example.server.service.FailedAnalysisTaskService;
-import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -27,18 +27,21 @@ public class AdminController {
     }
 
     @GetMapping
-    public List<FailedAnalysisTask> latest(
+    public Result<List<FailedTaskView>> latest(
             @RequestAttribute(AuthService.REQUEST_USER_ID) Long userId) {
         authService.requireAdmin(userId);
-        return failedTaskService.latest();
+        return Result.ok(failedTaskService.latest().stream()
+                .map(FailedTaskView::from)
+                .toList());
     }
 
     @PostMapping("/{id}/replay")
-    public ResponseEntity<String> replay(
+    public ResponseEntity<Result<Void>> replay(
             @PathVariable Long id,
             @RequestAttribute(AuthService.REQUEST_USER_ID) Long userId) {
         authService.requireAdmin(userId);
         failedTaskService.replay(id);
-        return ResponseEntity.status(HttpStatus.ACCEPTED).body("失败任务已重新入队");
+        // 重新入队是异步受理，用 202 表达“已接单”而非“已完成”。
+        return ResponseEntity.accepted().body(Result.ok());
     }
 }

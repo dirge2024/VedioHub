@@ -1,54 +1,89 @@
 import { apiRequest } from './api'
 
-export function createTaskStreams() {
+/**
+ * 后台任务的 SSE 连接池。
+ * onActiveChange 让界面（例如资料库卡片）能感知“哪些视频正在跑任务”，
+ * 用户关掉侧边栏之后仍然看得到任务在进行。
+ */
+export function createTaskStreams({ onActiveChange = () => {} } = {}) {
   const streams = new Map()
   const keyOf = (id, type, scope = '') => `${type}:${id}:${scope}`
+  const publish = () => onActiveChange([...streams.values()]
+    .map(({ id, type, scope }) => ({ id, type, scope })))
 
   const stop = (id, type, scope = '') => {
     const key = keyOf(id, type, scope)
-    streams.get(key)?.abort()
+    const entry = streams.get(key)
+    if (!entry) return
+    entry.controller.abort()
     streams.delete(key)
+    publish()
   }
 
   const stopAll = () => {
-    for (const controller of streams.values()) controller.abort()
+    if (!streams.size) return
+    for (const { controller } of streams.values()) controller.abort()
     streams.clear()
+    publish()
   }
 
   const stopMedia = id => {
-    for (const [key, controller] of streams.entries()) {
-      if (key.split(':', 2)[1] !== String(id)) continue
-      controller.abort()
+    let changed = false
+    for (const [key, entry] of streams.entries()) {
+      if (String(entry.id) !== String(id)) continue
+      entry.controller.abort()
       streams.delete(key)
+      changed = true
     }
+    if (changed) publish()
   }
 
   const start = (id, type, scope, path, onEvent, onError) => {
     stop(id, type, scope)
     const key = keyOf(id, type, scope)
     const controller = new AbortController()
-    streams.set(key, controller)
+    streams.set(key, { controller, id, type, scope })
+    publish()
     let reconnectAttempt = 0
 
+    const release = () => {
+      if (streams.get(key)?.controller !== controller) return
+      streams.delete(key)
+      publish()
+    }
+
     const run = async () => {
-      while (!controller.signal.aborted && streams.get(key) === controller) {
+      while (!controller.signal.aborted && streams.get(key)?.controller === controller) {
         try {
           const response = await apiRequest(path, {
             headers: { Accept: 'text/event-stream' },
             signal: controller.signal
           })
-          if (!response.ok || !response.body) throw new Error(await response.text())
+          if (!response.ok) {
+            const error = new Error(
+              (await response.text()) || `事件流连接失败（HTTP ${response.status}）`)
+            error.status = response.status
+            // 目标不存在、无权访问、参数非法这类错误不会自愈，继续重连只是空转，
+            // 还会让界面永远停在“重连中”。直接释放连接并告知调用方这是终态。
+            if (isTerminalStatus(response.status)) {
+              release()
+              onError?.(error, reconnectAttempt + 1, true)
+              return
+            }
+            throw error
+          }
+          if (!response.body) throw new Error('服务端未返回事件流')
           const terminal = await consumeStream(response.body, async event => {
             reconnectAttempt = 0
             await onEvent(event)
           }, controller.signal)
           if (terminal) {
-            streams.delete(key)
+            release()
             return
           }
         } catch (error) {
           if (controller.signal.aborted) return
-          onError?.(error)
+          onError?.(error, reconnectAttempt + 1)
         }
         const delay = Math.min(15_000, 1_000 * 2 ** reconnectAttempt++)
         await waitForRetry(delay, controller.signal)
@@ -56,17 +91,29 @@ export function createTaskStreams() {
     }
 
     run().catch(error => {
-      if (!controller.signal.aborted) onError?.(error)
+      if (controller.signal.aborted) return
+      // 走到这里说明重连循环本身异常退出，连接不会再恢复，同样按终态通知。
+      release()
+      onError?.(error, reconnectAttempt + 1, true)
     })
   }
 
   return {
     has: (id, type, scope = '') => streams.has(keyOf(id, type, scope)),
+    hasMedia: id => [...streams.values()].some(entry => String(entry.id) === String(id)),
     start,
     stop,
     stopMedia,
     stopAll
   }
+}
+
+/**
+ * 判断是否为不可恢复的错误：4xx 中除 408（请求超时）与 429（限流）之外都不会自愈，
+ * 重连无意义；网络错误、408、429 与 5xx 仍走指数退避重连。
+ */
+function isTerminalStatus(status) {
+  return status >= 400 && status < 500 && status !== 408 && status !== 429
 }
 
 function waitForRetry(delay, signal) {

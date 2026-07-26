@@ -35,6 +35,11 @@ public class AnalysisTaskMsg implements Serializable {
     }
 
     public boolean hasSupportedAction() {
+        return isSupportedAction(action);
+    }
+
+    /** 供失败台账等场景在没有消息实例时复用同一套 action 判定，避免两处规则漂移。 */
+    public static boolean isSupportedAction(String action) {
         return START_ANALYSIS.equals(action) || REVISE_ANALYSIS.equals(action);
     }
 }

@@ -1,10 +1,13 @@
 package com.example.server.controller;
 
+import com.example.server.common.ErrorCode;
+import com.example.server.common.Result;
 import com.example.server.dto.AgentFeedback;
 import com.example.server.dto.AgentState;
 import com.example.server.dto.TaskStatus;
 import com.example.server.dto.VideoEvidenceHit;
 import com.example.server.entity.MediaFile;
+import com.example.server.exception.BusinessException;
 import com.example.server.service.AgentCheckpointService;
 import com.example.server.service.AnalysisDispatchService;
 import com.example.server.service.AnalysisStatusService;
@@ -14,7 +17,7 @@ import com.example.server.service.AiService;
 import com.example.server.service.AuthService;
 import com.example.server.service.MediaService;
 import com.example.server.service.TaskEventService;
-import org.springframework.http.HttpStatus;
+import jakarta.validation.Valid;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -63,20 +66,21 @@ public class AnalysisController {
     }
 
     @PostMapping("/ai")
-    public ResponseEntity<String> aiAnalyze(
+    public ResponseEntity<Result<Void>> aiAnalyze(
             @RequestParam Long id,
             @RequestParam(defaultValue = "理解视频核心内容并生成结构化分析报告") String goal,
             @RequestAttribute(AuthService.REQUEST_USER_ID) Long userId) {
         String normalizedGoal = normalizeText(goal, "分析目标");
         MediaFile mediaFile = mediaService.requireOwnedMedia(id, userId);
         if (checkpointService.loadResult(id, normalizedGoal) != null) {
-            return ResponseEntity.ok("已有可复用的分析结果");
+            // 已有可复用结果，是“已完成”而非“已受理”，用 200 与异步受理区分开。
+            return ResponseEntity.ok(Result.ok());
         }
         return submissionResponse(dispatchService.submit(mediaFile, normalizedGoal, null));
     }
 
     @PostMapping("/follow-up")
-    public ResponseEntity<String> followUp(
+    public Result<String> followUp(
             @RequestParam Long id,
             @RequestParam String question,
             @RequestParam(required = false) String goal,
@@ -85,63 +89,63 @@ public class AnalysisController {
         String normalizedGoal = goal == null || goal.isBlank()
                 ? null : normalizeText(goal, "原始分析目标");
         mediaService.requireOwnedMedia(id, userId);
-        return ResponseEntity.ok(aiService.followUp(id, normalizedGoal, normalizedQuestion));
+        return Result.ok(aiService.followUp(id, normalizedGoal, normalizedQuestion));
     }
 
     @GetMapping("/evidence-search")
-    public List<VideoEvidenceHit> searchEvidence(
+    public Result<List<VideoEvidenceHit>> searchEvidence(
             @RequestParam Long id,
             @RequestParam String query,
             @RequestAttribute(AuthService.REQUEST_USER_ID) Long userId) {
         mediaService.requireOwnedMedia(id, userId);
-        return aiService.searchEvidence(id, normalizeText(query, "检索问题"));
+        return Result.ok(aiService.searchEvidence(id, normalizeText(query, "检索问题")));
     }
 
     @PostMapping("/agent-feedback")
-    public ResponseEntity<String> agentFeedback(
-            @RequestBody AgentFeedback feedback,
+    public Result<Void> agentFeedback(
+            @Valid @RequestBody AgentFeedback feedback,
             @RequestAttribute(AuthService.REQUEST_USER_ID) Long userId) {
-        validateFeedback(feedback);
+        ensureRating(feedback);
         mediaService.requireOwnedMedia(feedback.mediaId(), userId);
         checkpointService.saveFeedback(feedback.normalized());
-        return ResponseEntity.ok("反馈已保存为 Agent 评测样本");
+        return Result.ok();
     }
 
     @PostMapping("/agent-revise")
-    public ResponseEntity<String> reviseAgentResult(
-            @RequestBody AgentFeedback feedback,
+    public ResponseEntity<Result<Void>> reviseAgentResult(
+            @Valid @RequestBody AgentFeedback feedback,
             @RequestAttribute(AuthService.REQUEST_USER_ID) Long userId) {
-        validateFeedback(feedback);
+        ensureRating(feedback);
         MediaFile mediaFile = mediaService.requireOwnedMedia(feedback.mediaId(), userId);
         String revisedGoal = aiService.revisionGoal(feedback);
         return submissionResponse(dispatchService.submit(mediaFile, revisedGoal, feedback));
     }
 
     @GetMapping("/agent-feedback")
-    public List<AgentFeedback> agentFeedback(
+    public Result<List<AgentFeedback>> agentFeedback(
             @RequestParam Long id,
             @RequestAttribute(AuthService.REQUEST_USER_ID) Long userId) {
         mediaService.requireOwnedMedia(id, userId);
-        return checkpointService.loadFeedback(id);
+        return Result.ok(checkpointService.loadFeedback(id));
     }
 
     @GetMapping("/agent-plan")
-    public AgentState.AgentPlan agentPlan(
+    public Result<AgentState.AgentPlan> agentPlan(
             @RequestParam Long id,
             @RequestParam String goal,
             @RequestAttribute(AuthService.REQUEST_USER_ID) Long userId) {
         mediaService.requireOwnedMedia(id, userId);
-        return checkpointService.loadPlan(id, normalizeText(goal, "分析目标"));
+        return Result.ok(checkpointService.loadPlan(id, normalizeText(goal, "分析目标")));
     }
 
     @GetMapping("/analysis-status")
-    public TaskStatus analysisStatus(
+    public Result<TaskStatus> analysisStatus(
             @RequestParam Long id,
             @RequestParam String goal,
             @RequestAttribute(AuthService.REQUEST_USER_ID) Long userId) {
         mediaService.requireOwnedMedia(id, userId);
         String normalizedGoal = normalizeText(goal, "分析目标");
-        return statusService.current(id, normalizedGoal);
+        return Result.ok(statusService.current(id, normalizedGoal));
     }
 
     @GetMapping(value = "/analysis-events", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
@@ -160,23 +164,27 @@ public class AnalysisController {
     }
 
     @GetMapping("/agent-evaluation")
-    public Map<String, Object> agentEvaluation(
+    public Result<Map<String, Object>> agentEvaluation(
             @RequestParam Long id,
             @RequestParam String goal,
             @RequestAttribute(AuthService.REQUEST_USER_ID) Long userId) {
         mediaService.requireOwnedMedia(id, userId);
-        return evaluationService.evaluate(id, normalizeText(goal, "分析目标"));
+        return Result.ok(evaluationService.evaluate(id, normalizeText(goal, "分析目标")));
     }
 
     @GetMapping("/agent-trace")
-    public Map<String, Object> agentTrace(
+    public Result<Map<String, Object>> agentTrace(
             @RequestParam Long id,
             @RequestParam String goal,
             @RequestAttribute(AuthService.REQUEST_USER_ID) Long userId) {
         mediaService.requireOwnedMedia(id, userId);
-        return telemetry.latest(id, normalizeText(goal, "分析目标"));
+        return Result.ok(telemetry.latest(id, normalizeText(goal, "分析目标")));
     }
 
+    /**
+     * 请求参数的规整 + 校验：既做 trim 归一（结果参与幂等 key 计算，不能省），
+     * 又限制长度。请求体（DTO）改用 Bean Validation，参数这里保留是因为它承担了归一职责。
+     */
     private String normalizeText(String value, String field) {
         if (value == null || value.isBlank() || value.length() > MAX_GOAL_LENGTH) {
             throw new IllegalArgumentException(field + "不能为空且不能超过 " + MAX_GOAL_LENGTH + " 字");
@@ -184,41 +192,24 @@ public class AnalysisController {
         return value.trim();
     }
 
-    private ResponseEntity<String> submissionResponse(AnalysisDispatchService.SubmissionResult result) {
-        return switch (result) {
-            case ACCEPTED -> ResponseEntity.status(HttpStatus.ACCEPTED).body("任务已提交");
-            case RATE_LIMITED -> ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS)
-                    .body("系统繁忙，请稍后再试");
-            case DUPLICATE -> ResponseEntity.status(HttpStatus.CONFLICT)
-                    .body("相同视频和分析目标正在处理中");
-            case FAILED -> ResponseEntity.internalServerError().body("任务提交失败");
-        };
+    private void ensureRating(AgentFeedback feedback) {
+        Integer rating = feedback.rating();
+        if (rating != null && rating != -1 && rating != 1) {
+            throw new BusinessException(ErrorCode.INVALID_ARGUMENT, "rating 只能是 -1 或 1");
+        }
     }
 
-    private void validateFeedback(AgentFeedback feedback) {
-        if (feedback == null || feedback.mediaId() == null) {
-            throw new IllegalArgumentException("mediaId 不能为空");
-        }
-        normalizeText(feedback.goal(), "分析目标");
-        if (feedback.rating() != null && feedback.rating() != -1 && feedback.rating() != 1) {
-            throw new IllegalArgumentException("rating 只能是 -1 或 1");
-        }
-        if (feedback.comment() != null && feedback.comment().length() > 2_000) {
-            throw new IllegalArgumentException("反馈说明不能超过 2000 字");
-        }
-        if (feedback.correctedGoal() != null && !feedback.correctedGoal().isBlank()) {
-            normalizeText(feedback.correctedGoal(), "修正后的分析目标");
-        }
-        if (feedback.errorType() != null && feedback.errorType().length() > 64) {
-            throw new IllegalArgumentException("错误类型不能超过 64 字");
-        }
-        if (feedback.correctedTasks() != null
-                && (feedback.correctedTasks().size() > 5
-                || feedback.correctedTasks().stream().anyMatch(task -> task == null || task.length() > 500))) {
-            throw new IllegalArgumentException("修正任务最多 5 条且每条不能超过 500 字");
-        }
-        if (feedback.evidenceTimestamp() != null && feedback.evidenceTimestamp() < 0) {
-            throw new IllegalArgumentException("证据时间戳不能为负数");
-        }
+    /**
+     * 异步任务受理返回 202 Accepted：明确告诉客户端“已接单、结果稍后轮询/订阅”，
+     * 与同步完成的 200 区分开，便于前端区分“已完成”“已受理”“需重试”三种状态。
+     */
+    private ResponseEntity<Result<Void>> submissionResponse(
+            AnalysisDispatchService.SubmissionResult result) {
+        return switch (result) {
+            case ACCEPTED -> ResponseEntity.accepted().body(Result.ok());
+            case RATE_LIMITED -> throw new BusinessException(ErrorCode.RATE_LIMITED, "系统繁忙，请稍后再试");
+            case DUPLICATE -> throw new BusinessException(ErrorCode.CONFLICT, "相同视频和分析目标正在处理中");
+            case FAILED -> throw new BusinessException(ErrorCode.INTERNAL_ERROR, "任务提交失败");
+        };
     }
 }

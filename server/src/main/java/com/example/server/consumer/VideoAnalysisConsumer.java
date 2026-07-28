@@ -128,7 +128,7 @@ public class VideoAnalysisConsumer implements RocketMQListener<AnalysisTaskMsg> 
                     if (reusable != null && reusable.result() != null
                             && aiService.reuseResult(mediaId, sourceMediaId, reusable, mode)) {
                         taskEventService.publishAnalysis(mediaId, msg.getUserGoal(), mode,
-                                TaskStatus.completed(reusable.result().toMarkdown()), TaskStage.COMPLETED_REUSED);
+                                TaskStatus.completed(reusable), TaskStage.COMPLETED_REUSED);
                         log.info("video_analysis_reused mediaId={} sourceMediaId={}", mediaId, sourceMediaId);
                         return;
                     }
@@ -147,7 +147,7 @@ public class VideoAnalysisConsumer implements RocketMQListener<AnalysisTaskMsg> 
             AgentState completed = checkpointService.loadResult(mediaId, msg.getUserGoal(), mode);
             if (completed != null && completed.result() != null) {
                 taskEventService.publishAnalysis(mediaId, msg.getUserGoal(), mode,
-                        TaskStatus.completed(completed.result().toMarkdown()), TaskStage.COMPLETED);
+                        TaskStatus.completed(completed), TaskStage.COMPLETED);
             }
         } catch (AgentLoopService.BudgetExceededException e) {
             saveStage(mediaId, msg.getUserGoal(), mode, TaskStage.BUDGET_EXHAUSTED);

@@ -26,31 +26,6 @@ CREATE TABLE IF NOT EXISTS media_files (
     KEY idx_media_status_time (status, upload_time)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
-SET @content_hash_column_exists = (
-    SELECT COUNT(1) FROM information_schema.columns
-    WHERE table_schema = DATABASE() AND table_name = 'media_files' AND column_name = 'content_hash'
-);
-SET @content_hash_column_sql = IF(
-    @content_hash_column_exists = 0,
-    'ALTER TABLE media_files ADD COLUMN content_hash VARCHAR(64) NULL, ALGORITHM=INSTANT, LOCK=NONE',
-    'SELECT 1'
-);
-PREPARE content_hash_column_statement FROM @content_hash_column_sql;
-EXECUTE content_hash_column_statement;
-DEALLOCATE PREPARE content_hash_column_statement;
-SET @content_hash_index_exists = (
-    SELECT COUNT(1) FROM information_schema.statistics
-    WHERE table_schema = DATABASE() AND table_name = 'media_files' AND index_name = 'idx_media_content_hash'
-);
-SET @content_hash_index_sql = IF(
-    @content_hash_index_exists = 0,
-    'ALTER TABLE media_files ADD INDEX idx_media_content_hash(content_hash), ALGORITHM=INPLACE, LOCK=NONE',
-    'SELECT 1'
-);
-PREPARE content_hash_index_statement FROM @content_hash_index_sql;
-EXECUTE content_hash_index_statement;
-DEALLOCATE PREPARE content_hash_index_statement;
-
 CREATE TABLE IF NOT EXISTS agent_checkpoints (
     media_id BIGINT NOT NULL,
     checkpoint_key VARCHAR(160) NOT NULL,
@@ -78,16 +53,3 @@ CREATE TABLE IF NOT EXISTS failed_analysis_tasks (
     KEY idx_failed_analysis_status_time (status, created_at),
     KEY idx_failed_analysis_media (media_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
-SET @failed_task_mode_column_exists = (
-    SELECT COUNT(1) FROM information_schema.columns
-    WHERE table_schema = DATABASE() AND table_name = 'failed_analysis_tasks' AND column_name = 'mode'
-);
-SET @failed_task_mode_column_sql = IF(
-    @failed_task_mode_column_exists = 0,
-    'ALTER TABLE failed_analysis_tasks ADD COLUMN mode VARCHAR(32) NOT NULL DEFAULT ''GENERAL'', ALGORITHM=INSTANT, LOCK=NONE',
-    'SELECT 1'
-);
-PREPARE failed_task_mode_column_statement FROM @failed_task_mode_column_sql;
-EXECUTE failed_task_mode_column_statement;
-DEALLOCATE PREPARE failed_task_mode_column_statement;

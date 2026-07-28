@@ -43,7 +43,7 @@ public class AgentLoopService {
                             @Value("${agent.budget.max-rounds:2}") int maxRounds,
                             @Value("${agent.budget.max-duration-ms:120000}") long maxDurationMs,
                             @Value("${agent.budget.max-estimated-tokens:50000}") long maxEstimatedTokens,
-                            @Value("${agent.budget.max-estimated-cost:1}") double maxEstimatedCost) {
+                            @Value("${agent.budget.max-estimated-cost:0}") double maxEstimatedCost) {
         this.deepSeekUtils = deepSeekUtils;
         this.longVideoContextService = longVideoContextService;
         this.checkpointService = checkpointService;
@@ -437,7 +437,7 @@ public class AgentLoopService {
             reason = "Agent 超过最大执行时长 " + maxDurationMs + "ms";
         } else if (usage.estimatedTokens() > maxEstimatedTokens) {
             reason = "Agent 超过最大 Token 预算 " + maxEstimatedTokens;
-        } else if (usage.estimatedCost() > maxEstimatedCost) {
+        } else if (maxEstimatedCost > 0 && usage.estimatedCost() > maxEstimatedCost) {
             reason = "Agent 超过最大成本预算 " + maxEstimatedCost;
         }
         if (reason == null) return;

@@ -20,8 +20,10 @@ import com.example.server.service.AiService;
 import com.example.server.service.AuthService;
 import com.example.server.service.MediaService;
 import com.example.server.service.TaskEventService;
+import com.example.server.service.VideoContextNotReadyException;
 import com.example.server.service.mode.ModeRouter;
 import jakarta.validation.Valid;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -35,6 +37,10 @@ import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Executor;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.function.Supplier;
 
 @RestController
 @RequestMapping("/analysis")
@@ -51,6 +57,7 @@ public class AnalysisController {
     private final TaskEventService taskEventService;
     private final AnalysisStatusService statusService;
     private final ModeRouter modeRouter;
+    private final Executor aiTaskExecutor;
 
     public AnalysisController(AiService aiService,
                               AnalysisDispatchService dispatchService,
@@ -60,7 +67,8 @@ public class AnalysisController {
                               MediaService mediaService,
                               TaskEventService taskEventService,
                               AnalysisStatusService statusService,
-                              ModeRouter modeRouter) {
+                              ModeRouter modeRouter,
+                              @Qualifier("aiTaskExecutor") Executor aiTaskExecutor) {
         this.aiService = aiService;
         this.dispatchService = dispatchService;
         this.checkpointService = checkpointService;
@@ -70,6 +78,7 @@ public class AnalysisController {
         this.taskEventService = taskEventService;
         this.statusService = statusService;
         this.modeRouter = modeRouter;
+        this.aiTaskExecutor = aiTaskExecutor;
     }
 
     /**
@@ -105,7 +114,7 @@ public class AnalysisController {
     }
 
     @PostMapping("/follow-up")
-    public Result<String> followUp(
+    public CompletableFuture<Result<String>> followUp(
             @RequestParam Long id,
             @RequestParam String question,
             @RequestParam(required = false) String goal,
@@ -115,17 +124,23 @@ public class AnalysisController {
         String normalizedGoal = goal == null || goal.isBlank()
                 ? null : normalizeText(goal, "原始分析目标");
         mediaService.requireOwnedMedia(id, userId);
-        return Result.ok(aiService.followUp(
-                id, normalizedGoal, normalizedQuestion, AnalysisMode.fromRequest(mode)));
+        requireVideoContext(id);
+        dispatchService.requireAiQuota(userId);
+        AnalysisMode analysisMode = AnalysisMode.fromRequest(mode);
+        return runInteractive(() -> aiService.followUp(
+                id, normalizedGoal, normalizedQuestion, analysisMode));
     }
 
     @GetMapping("/evidence-search")
-    public Result<List<VideoEvidenceHit>> searchEvidence(
+    public CompletableFuture<Result<List<VideoEvidenceHit>>> searchEvidence(
             @RequestParam Long id,
             @RequestParam String query,
             @RequestAttribute(AuthService.REQUEST_USER_ID) Long userId) {
         mediaService.requireOwnedMedia(id, userId);
-        return Result.ok(aiService.searchEvidence(id, normalizeText(query, "检索问题")));
+        requireVideoContext(id);
+        dispatchService.requireAiQuota(userId);
+        String normalizedQuery = normalizeText(query, "检索问题");
+        return runInteractive(() -> aiService.searchEvidence(id, normalizedQuery));
     }
 
     @PostMapping("/agent-feedback")
@@ -236,6 +251,20 @@ public class AnalysisController {
         Integer rating = feedback.rating();
         if (rating != null && rating != -1 && rating != 1) {
             throw new BusinessException(ErrorCode.INVALID_ARGUMENT, "rating 只能是 -1 或 1");
+        }
+    }
+
+    private void requireVideoContext(Long mediaId) {
+        if (checkpointService.loadContext(mediaId) == null) {
+            throw new VideoContextNotReadyException();
+        }
+    }
+
+    private <T> CompletableFuture<Result<T>> runInteractive(Supplier<T> action) {
+        try {
+            return CompletableFuture.supplyAsync(() -> Result.ok(action.get()), aiTaskExecutor);
+        } catch (RejectedExecutionException e) {
+            throw new BusinessException(ErrorCode.SERVICE_UNAVAILABLE, "AI 请求较多，请稍后再试");
         }
     }
 

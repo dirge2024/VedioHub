@@ -25,7 +25,7 @@ public class AnalysisStatusService {
     public TaskStatus current(Long mediaId, String goal, AnalysisMode mode) {
         AgentState result = checkpointService.loadResult(mediaId, goal, mode);
         if (result != null && result.result() != null) {
-            return TaskStatus.completed(result.result().toMarkdown());
+            return TaskStatus.completed(result);
         }
 
         TaskStage stage = checkpointService.loadStage(mediaId, goal, mode);

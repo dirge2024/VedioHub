@@ -20,6 +20,7 @@ import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
 
 import java.util.NoSuchElementException;
+import java.util.concurrent.CompletionException;
 import java.util.stream.Collectors;
 
 /**
@@ -97,6 +98,30 @@ public class ApiExceptionHandler {
     public ResponseEntity<Result<Void>> videoContextNotReady(VideoContextNotReadyException error) {
         return build(HttpStatus.CONFLICT, ErrorCode.CONFLICT.code(),
                 safe(error.getMessage(), "视频上下文尚未就绪"));
+    }
+
+    /**
+     * CompletableFuture 会把工作线程里的业务异常包成 CompletionException。
+     * 解包后继续走原有映射，避免异步化把原本的 4xx/422 全部降级成 500。
+     */
+    @ExceptionHandler(CompletionException.class)
+    public ResponseEntity<Result<Void>> asyncFailure(CompletionException error) {
+        Throwable cause = error.getCause();
+        while (cause instanceof CompletionException nested && nested.getCause() != null) {
+            cause = nested.getCause();
+        }
+        if (cause instanceof BusinessException businessException) return business(businessException);
+        if (cause instanceof AgentLoopService.BudgetExceededException budgetException) {
+            return budgetExceeded(budgetException);
+        }
+        if (cause instanceof VideoContextNotReadyException contextException) {
+            return videoContextNotReady(contextException);
+        }
+        if (cause instanceof NoSuchElementException notFoundException) return notFound(notFoundException);
+        if (cause instanceof SecurityException securityException) return forbidden(securityException);
+        if (cause instanceof IllegalArgumentException argumentException) return badRequest(argumentException);
+        if (cause instanceof Exception exception) return internalError(exception);
+        return internalError(error);
     }
 
     // ---- 兜底：真正未知的异常才落到这里，不对外泄漏细节 ----

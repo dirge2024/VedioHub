@@ -86,6 +86,22 @@ public class AgentCheckpointRepository {
         }
     }
 
+    @Transactional
+    public void writeStandalone(Long mediaId,
+                                String checkpointName,
+                                String redisKey,
+                                String field,
+                                TaskStage stage,
+                                Object value) {
+        try {
+            String payload = objectMapper.writeValueAsString(value);
+            checkpointMapper.upsert(mediaId, checkpointName, stage.name(), payload);
+            afterCommit(() -> cacheField(redisKey, field, payload, stage.name()));
+        } catch (Exception e) {
+            throw new IllegalStateException("保存 Agent Checkpoint 失败", e);
+        }
+    }
+
     public void writeStage(Long mediaId,
                            String checkpointName,
                            String redisKey,
@@ -96,6 +112,18 @@ public class AgentCheckpointRepository {
 
     public void deleteByPrefix(Long mediaId, String checkpointPrefix) {
         checkpointMapper.deleteByPrefix(mediaId, checkpointPrefix);
+    }
+
+    @Transactional
+    public void delete(Long mediaId, String checkpointName, String redisKey) {
+        checkpointMapper.delete(mediaId, checkpointName);
+        afterCommit(() -> {
+            try {
+                redisTemplate.delete(redisKey);
+            } catch (RuntimeException e) {
+                log.warn("agent_checkpoint_cache_delete_failed key={}", redisKey, e);
+            }
+        });
     }
 
     public void deleteByMediaId(Long mediaId) {

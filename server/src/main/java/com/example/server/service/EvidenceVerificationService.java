@@ -4,14 +4,10 @@ import com.example.server.dto.AnalysisResult;
 import com.example.server.dto.VideoContext;
 import org.springframework.stereotype.Service;
 
-import java.util.HashSet;
 import java.util.Locale;
-import java.util.Set;
 
 @Service
 public class EvidenceVerificationService {
-
-    private static final double MIN_BIGRAM_COVERAGE = 0.5;
 
     public boolean timestampCovered(VideoContext context, AnalysisResult.Evidence evidence) {
         return context != null && evidence != null && context.segments().stream()
@@ -53,25 +49,9 @@ public class EvidenceVerificationService {
     private boolean textMatches(String evidence, String candidate) {
         String normalizedEvidence = normalize(evidence);
         String normalizedCandidate = normalize(candidate);
-        if (normalizedEvidence.isEmpty() || normalizedCandidate.isEmpty()) return false;
-        if (normalizedCandidate.contains(normalizedEvidence)
-                || normalizedEvidence.contains(normalizedCandidate)) {
-            return true;
-        }
-        if (normalizedEvidence.length() < 4 || normalizedCandidate.length() < 4) return false;
-
-        Set<String> evidenceBigrams = bigrams(normalizedEvidence);
-        Set<String> candidateBigrams = bigrams(normalizedCandidate);
-        long overlap = evidenceBigrams.stream().filter(candidateBigrams::contains).count();
-        return (double) overlap / evidenceBigrams.size() >= MIN_BIGRAM_COVERAGE;
-    }
-
-    private Set<String> bigrams(String value) {
-        Set<String> result = new HashSet<>();
-        for (int i = 0; i < value.length() - 1; i++) {
-            result.add(value.substring(i, i + 2));
-        }
-        return result;
+        return !normalizedEvidence.isEmpty()
+                && !normalizedCandidate.isEmpty()
+                && normalizedCandidate.contains(normalizedEvidence);
     }
 
     private String normalize(String value) {

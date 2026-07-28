@@ -15,8 +15,6 @@ import org.slf4j.LoggerFactory;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
-import org.springframework.transaction.support.TransactionSynchronization;
-import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import java.time.Duration;
 import java.util.ArrayList;
@@ -36,7 +34,6 @@ public class AgentCheckpointService {
 
     private static final Logger log = LoggerFactory.getLogger(AgentCheckpointService.class);
     private static final int MAX_FEEDBACK_SAMPLES = 200;
-    private static final Duration REVISION_TTL = Duration.ofHours(2);
     private static final Duration FEEDBACK_TTL = Duration.ofDays(30);
 
     private final StringRedisTemplate redisTemplate;
@@ -180,16 +177,14 @@ public class AgentCheckpointService {
 
     public void stageRevision(Long mediaId, String goal, AnalysisMode mode, AgentState.AgentPlan plan) {
         String key = revisionKey(mediaId, goal, mode);
-        try {
-            redisTemplate.opsForHash().put(key, "pending", "1");
-            if (plan != null) {
-                redisTemplate.opsForHash().put(key, "plan", objectMapper.writeValueAsString(plan));
-            }
-            redisTemplate.expire(key, REVISION_TTL);
-            rememberGoalKey(mediaId, key);
-        } catch (Exception e) {
-            throw new IllegalStateException("暂存 Agent 修正计划失败", e);
-        }
+        checkpointRepository.writeStandalone(
+                mediaId,
+                revisionCheckpoint(goal, mode),
+                key,
+                "revision",
+                TaskStage.REVISION_PENDING,
+                new RevisionCheckpoint(plan, false));
+        rememberGoalKey(mediaId, key);
     }
 
     public boolean beginStagedRevision(Long mediaId, String goal) {
@@ -198,24 +193,28 @@ public class AgentCheckpointService {
 
     @Transactional
     public boolean beginStagedRevision(Long mediaId, String goal, AnalysisMode mode) {
-        String revisionKey = revisionKey(mediaId, goal, mode);
-        if (!Boolean.TRUE.equals(redisTemplate.hasKey(revisionKey))) return false;
+        String key = revisionKey(mediaId, goal, mode);
+        RevisionCheckpoint revision = checkpointRepository.read(
+                mediaId, revisionCheckpoint(goal, mode), key, "revision", RevisionCheckpoint.class);
+        if (revision == null) return false;
+        if (revision.applied()) return true;
 
-        AgentState.AgentPlan plan = readRevisionPlan(revisionKey);
         checkpointRepository.deleteByPrefix(mediaId, goalCheckpoint(goal, mode, ""));
         redisTemplate.delete(goalKey(mediaId, goal, mode));
-        if (plan != null) savePlan(mediaId, goal, mode, plan);
-        TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
-            @Override
-            public void afterCommit() {
-                try {
-                    redisTemplate.delete(revisionKey);
-                } catch (RuntimeException e) {
-                    log.warn("agent_revision_cleanup_failed key={}", revisionKey, e);
-                }
-            }
-        });
+        if (revision.plan() != null) savePlan(mediaId, goal, mode, revision.plan());
+        checkpointRepository.writeStandalone(
+                mediaId,
+                revisionCheckpoint(goal, mode),
+                key,
+                "revision",
+                TaskStage.REVISION_APPLIED,
+                new RevisionCheckpoint(revision.plan(), true));
         return true;
+    }
+
+    public void completeStagedRevision(Long mediaId, String goal, AnalysisMode mode) {
+        checkpointRepository.delete(
+                mediaId, revisionCheckpoint(goal, mode), revisionKey(mediaId, goal, mode));
     }
 
     public void cancelStagedRevision(Long mediaId, String goal) {
@@ -223,7 +222,8 @@ public class AgentCheckpointService {
     }
 
     public void cancelStagedRevision(Long mediaId, String goal, AnalysisMode mode) {
-        redisTemplate.delete(revisionKey(mediaId, goal, mode));
+        checkpointRepository.delete(
+                mediaId, revisionCheckpoint(goal, mode), revisionKey(mediaId, goal, mode));
     }
 
     public void saveFeedback(AgentFeedback feedback) {
@@ -279,17 +279,6 @@ public class AgentCheckpointService {
         }
     }
 
-    private AgentState.AgentPlan readRevisionPlan(String key) {
-        try {
-            Object value = redisTemplate.opsForHash().get(key, "plan");
-            return value == null ? null : objectMapper.readValue(
-                    value.toString(), AgentState.AgentPlan.class);
-        } catch (Exception e) {
-            log.warn("agent_revision_plan_read_failed key={}", key, e);
-            return null;
-        }
-    }
-
     private void rememberGoalKey(Long mediaId, String key) {
         try {
             redisTemplate.opsForSet().add(goalIndexKey(mediaId), key);
@@ -315,6 +304,10 @@ public class AgentCheckpointService {
         return goalKey(mediaId, goal, mode) + ":revision";
     }
 
+    private String revisionCheckpoint(String goal, AnalysisMode mode) {
+        return "revision:" + AnalysisTaskKeys.goalDigest(goal, mode);
+    }
+
     private String goalIndexKey(Long mediaId) {
         return checkpointKey(mediaId) + ":goals";
     }
@@ -325,5 +318,8 @@ public class AgentCheckpointService {
 
     private String goalCheckpoint(String goal, AnalysisMode mode, String field) {
         return "goal:" + AnalysisTaskKeys.goalDigest(goal, mode) + ":" + field;
+    }
+
+    private record RevisionCheckpoint(AgentState.AgentPlan plan, boolean applied) {
     }
 }

@@ -6,6 +6,7 @@ import com.example.server.dto.ModeClassification;
 import com.example.server.dto.VideoChunk;
 import com.example.server.dto.VideoContext;
 import com.example.server.dto.VideoRetrievalIntent;
+import com.example.server.service.AgentExecutionBudget;
 import com.example.server.service.AgentTelemetry;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.langchain4j.data.message.SystemMessage;
@@ -16,10 +17,17 @@ import dev.langchain4j.exception.RetriableException;
 import dev.langchain4j.model.chat.ChatModel;
 import dev.langchain4j.model.openai.OpenAiChatModel;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 import org.springframework.stereotype.Component;
 
 import java.time.Duration;
 import java.util.List;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Future;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 @Component
 public class DeepSeekUtils {
@@ -39,6 +47,8 @@ public class DeepSeekUtils {
     private final ChatModel chatModel;
     private final ObjectMapper objectMapper;
     private final AgentTelemetry telemetry;
+    private final ThreadPoolTaskExecutor modelCallExecutor;
+    private final long modelTimeoutMs;
     private final double inputPricePerMillion;
     private final double outputPricePerMillion;
 
@@ -50,7 +60,11 @@ public class DeepSeekUtils {
                          @Value("${ai.deepseek.output-price-per-million:0}") double outputPricePerMillion,
                          @Value("${agent.budget.max-estimated-cost:0}") double maxEstimatedCost,
                          AgentTelemetry telemetry,
-                         ObjectMapper objectMapper) {
+                         ObjectMapper objectMapper,
+                         @Qualifier("modelCallExecutor") ThreadPoolTaskExecutor modelCallExecutor) {
+        if (timeoutSeconds < 1) {
+            throw new IllegalArgumentException("模型超时时间必须大于 0");
+        }
         if (inputPricePerMillion < 0 || outputPricePerMillion < 0) {
             throw new IllegalArgumentException("模型 Token 单价不能为负数");
         }
@@ -68,6 +82,8 @@ public class DeepSeekUtils {
                 .build();
         this.objectMapper = objectMapper;
         this.telemetry = telemetry;
+        this.modelCallExecutor = modelCallExecutor;
+        this.modelTimeoutMs = TimeUnit.SECONDS.toMillis(timeoutSeconds);
         this.inputPricePerMillion = inputPricePerMillion;
         this.outputPricePerMillion = outputPricePerMillion;
     }
@@ -376,9 +392,7 @@ public class DeepSeekUtils {
         for (int attempt = 0; attempt < MAX_MODEL_ATTEMPTS; attempt++) {
             long started = System.nanoTime();
             try {
-                String response = chatModel.chat(
-                        SystemMessage.from(SYSTEM_POLICY),
-                        UserMessage.from(prompt)).aiMessage().text();
+                String response = invokeModel(prompt);
                 if (response == null || response.isBlank()) {
                     throw new RetriableException("模型返回空响应");
                 }
@@ -400,6 +414,37 @@ public class DeepSeekUtils {
             }
         }
         throw new IllegalStateException("模型调用达到最大重试次数", lastError);
+    }
+
+    private String invokeModel(String prompt) {
+        long remainingBudgetMs = AgentExecutionBudget.remainingMillis();
+        long timeoutMs = Math.min(modelTimeoutMs, remainingBudgetMs);
+        Future<String> future;
+        try {
+            future = modelCallExecutor.submit(() -> chatModel.chat(
+                    SystemMessage.from(SYSTEM_POLICY),
+                    UserMessage.from(prompt)).aiMessage().text());
+        } catch (RejectedExecutionException e) {
+            throw new RetriableException("模型调用线程池繁忙", e);
+        }
+        try {
+            return future.get(timeoutMs, TimeUnit.MILLISECONDS);
+        } catch (TimeoutException e) {
+            future.cancel(true);
+            if (remainingBudgetMs <= modelTimeoutMs) {
+                throw new AgentExecutionBudget.DeadlineExceededException(
+                        "模型调用超过 Agent 剩余时间预算");
+            }
+            throw new RetriableException("模型调用超时", e);
+        } catch (InterruptedException e) {
+            future.cancel(true);
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("模型调用被中断", e);
+        } catch (ExecutionException e) {
+            Throwable cause = e.getCause();
+            if (cause instanceof RuntimeException runtimeException) throw runtimeException;
+            throw new IllegalStateException("模型调用失败", cause);
+        }
     }
 
     private boolean isRetriableModelFailure(Throwable error) {

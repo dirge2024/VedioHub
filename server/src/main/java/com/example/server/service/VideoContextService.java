@@ -7,6 +7,7 @@ import com.example.server.utils.OcrUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 import org.springframework.stereotype.Service;
 
 import javax.imageio.ImageIO;
@@ -22,8 +23,10 @@ import java.util.Map;
 import java.util.TreeMap;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.CopyOnWriteArrayList;
-import java.util.concurrent.Executor;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.regex.Matcher;
@@ -42,15 +45,15 @@ public class VideoContextService {
     private final SegmentedTranscriptionService transcriptionService;
     private final OcrUtils ocrUtils;
     private final MinioUtils minioUtils;
-    private final Executor asrExecutor;
-    private final Executor ocrExecutor;
+    private final ThreadPoolTaskExecutor asrExecutor;
+    private final ThreadPoolTaskExecutor ocrExecutor;
     private final AgentTelemetry telemetry;
 
     public VideoContextService(SegmentedTranscriptionService transcriptionService,
                                OcrUtils ocrUtils,
                                MinioUtils minioUtils,
-                               @Qualifier("asrExecutor") Executor asrExecutor,
-                               @Qualifier("ocrExecutor") Executor ocrExecutor,
+                               @Qualifier("asrExecutor") ThreadPoolTaskExecutor asrExecutor,
+                               @Qualifier("ocrExecutor") ThreadPoolTaskExecutor ocrExecutor,
                                AgentTelemetry telemetry) {
         this.transcriptionService = transcriptionService;
         this.ocrUtils = ocrUtils;
@@ -68,55 +71,47 @@ public class VideoContextService {
         String readableVideoPath = minioUtils.readableSource(videoPath);
         Path workDir = Path.of(System.getProperty("java.io.tmpdir"), "video-context-" + UUID.randomUUID());
         List<String> uploadedEvidenceFrames = new CopyOnWriteArrayList<>();
+        CountDownLatch branchesFinished = new CountDownLatch(2);
+        boolean cleanupWorkDir = true;
         try {
             Files.createDirectories(workDir);
             // 两条分支各跑各的，单路挂掉还能带着另一半信息继续往下走。
-            CompletableFuture<BranchResult<TranscriptSegment>> transcriptFuture = submitBranch(
+            Future<BranchResult<TranscriptSegment>> transcriptFuture = submitBranch(
                     asrExecutor,
+                    branchesFinished,
                     () -> transcriptionService.transcribe(
                             readableVideoPath, workDir.resolve("audio"), traceId));
-            CompletableFuture<BranchResult<FramePart>> frameFuture = submitBranch(
+            Future<BranchResult<FramePart>> frameFuture = submitBranch(
                     ocrExecutor,
+                    branchesFinished,
                     () -> extractKeyFrames(
                             readableVideoPath, workDir.resolve("frames"), traceId, uploadedEvidenceFrames));
             try {
-                CompletableFuture.allOf(transcriptFuture, frameFuture).get(60, TimeUnit.MINUTES);
+                long deadline = System.nanoTime() + TimeUnit.MINUTES.toNanos(60);
+                BranchResult<TranscriptSegment> transcriptResult = awaitBranch(transcriptFuture, deadline);
+                BranchResult<FramePart> frameResult = awaitBranch(frameFuture, deadline);
+                return finishContext(
+                        videoPath, userGoal, traceId, transcriptResult, frameResult, uploadedEvidenceFrames);
             } catch (TimeoutException e) {
-                transcriptFuture.cancel(true);
-                frameFuture.cancel(true);
+                cleanupWorkDir = cancelBranches(branchesFinished, transcriptFuture, frameFuture);
                 throw new IllegalStateException("VideoContext 分支处理超过总时间预算", e);
             } catch (InterruptedException e) {
-                transcriptFuture.cancel(true);
-                frameFuture.cancel(true);
+                cleanupWorkDir = cancelBranches(branchesFinished, transcriptFuture, frameFuture);
                 Thread.currentThread().interrupt();
                 throw new IllegalStateException("VideoContext 构建被中断", e);
+            } catch (ExecutionException e) {
+                cleanupWorkDir = cancelBranches(branchesFinished, transcriptFuture, frameFuture);
+                throw new IllegalStateException("VideoContext 分支执行失败", e.getCause());
             }
-            BranchResult<TranscriptSegment> transcriptResult = transcriptFuture.join();
-            BranchResult<FramePart> frameResult = frameFuture.join();
-            if (transcriptResult.failed() && frameResult.failed()) {
-                IllegalStateException failure = new IllegalStateException(
-                        "ASR 和 OCR 分支均失败", transcriptResult.error());
-                failure.addSuppressed(frameResult.error());
-                throw failure;
-            }
-            if (transcriptResult.failed()) {
-                telemetry.increment(traceId, "asrBranchFailures", 1);
-                log.warn("video_context_asr_branch_failed", transcriptResult.error());
-            }
-            if (frameResult.failed()) {
-                telemetry.increment(traceId, "ocrBranchFailures", 1);
-                log.warn("video_context_ocr_branch_failed", frameResult.error());
-                deleteEvidenceFrames(uploadedEvidenceFrames);
-                uploadedEvidenceFrames.clear();
-            }
-            List<VideoContext.VideoSegment> segments = merge(transcriptResult.items(), frameResult.items());
-            if (segments.isEmpty()) throw new IllegalStateException("视频未解析出有效语音或画面文字");
-            return new VideoContext(videoPath, userGoal, segments);
         } catch (Exception e) {
             deleteEvidenceFrames(uploadedEvidenceFrames);
             throw new IllegalStateException("VideoContext 构建失败", e);
         } finally {
-            deleteDirectory(workDir);
+            if (cleanupWorkDir) {
+                deleteDirectory(workDir);
+            } else {
+                log.warn("video_context_workdir_retained path={} reason=branch_still_running", workDir);
+            }
         }
     }
 
@@ -141,18 +136,69 @@ public class VideoContextService {
                 });
     }
 
-    private <T> CompletableFuture<BranchResult<T>> submitBranch(
-            Executor executor, ThrowingSupplier<List<T>> work) {
+    private VideoContext finishContext(String videoPath,
+                                       String userGoal,
+                                       String traceId,
+                                       BranchResult<TranscriptSegment> transcriptResult,
+                                       BranchResult<FramePart> frameResult,
+                                       List<String> uploadedEvidenceFrames) {
+        if (transcriptResult.failed() && frameResult.failed()) {
+            IllegalStateException failure = new IllegalStateException(
+                    "ASR 和 OCR 分支均失败", transcriptResult.error());
+            failure.addSuppressed(frameResult.error());
+            throw failure;
+        }
+        if (transcriptResult.failed()) {
+            telemetry.increment(traceId, "asrBranchFailures", 1);
+            log.warn("video_context_asr_branch_failed", transcriptResult.error());
+        }
+        if (frameResult.failed()) {
+            telemetry.increment(traceId, "ocrBranchFailures", 1);
+            log.warn("video_context_ocr_branch_failed", frameResult.error());
+            deleteEvidenceFrames(uploadedEvidenceFrames);
+            uploadedEvidenceFrames.clear();
+        }
+        List<VideoContext.VideoSegment> segments = merge(transcriptResult.items(), frameResult.items());
+        if (segments.isEmpty()) throw new IllegalStateException("视频未解析出有效语音或画面文字");
+        return new VideoContext(videoPath, userGoal, segments);
+    }
+
+    private <T> Future<BranchResult<T>> submitBranch(
+            ThreadPoolTaskExecutor executor,
+            CountDownLatch branchesFinished,
+            ThrowingSupplier<List<T>> work) {
         try {
-            return CompletableFuture.supplyAsync(() -> {
+            return executor.submit(() -> {
                 try {
                     return BranchResult.success(work.get());
                 } catch (Exception e) {
                     return BranchResult.failure(e);
+                } finally {
+                    branchesFinished.countDown();
                 }
-            }, executor);
+            });
         } catch (RuntimeException e) {
+            branchesFinished.countDown();
             return CompletableFuture.completedFuture(BranchResult.failure(e));
+        }
+    }
+
+    private <T> BranchResult<T> awaitBranch(Future<BranchResult<T>> future, long deadlineNanos)
+            throws InterruptedException, ExecutionException, TimeoutException {
+        long remainingNanos = deadlineNanos - System.nanoTime();
+        if (remainingNanos <= 0) throw new TimeoutException("VideoContext 总时间预算已耗尽");
+        return future.get(remainingNanos, TimeUnit.NANOSECONDS);
+    }
+
+    private boolean cancelBranches(CountDownLatch branchesFinished, Future<?>... futures) {
+        for (Future<?> future : futures) {
+            if (future != null && !future.isDone()) future.cancel(true);
+        }
+        try {
+            return branchesFinished.await(10, TimeUnit.SECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return false;
         }
     }
 

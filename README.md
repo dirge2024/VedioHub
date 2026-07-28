@@ -8,7 +8,7 @@
     <img src="https://img.shields.io/badge/Vue-3-42B883?style=flat-square" alt="Vue 3">
     <img src="https://img.shields.io/badge/MySQL-8-4479A1?style=flat-square" alt="MySQL 8">
     <img src="https://img.shields.io/badge/Redis-7-DC382D?style=flat-square" alt="Redis 7">
-    <img src="https://img.shields.io/badge/RocketMQ-4.9-D77310?style=flat-square" alt="RocketMQ 4.9">
+    <img src="https://img.shields.io/badge/RocketMQ-5.3.2-D77310?style=flat-square" alt="RocketMQ 5.3.2">
     <img src="https://img.shields.io/badge/LangChain4j-Agent-20232A?style=flat-square" alt="LangChain4j">
     <a href="./LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue?style=flat-square" alt="MIT License"></a>
   </p>
@@ -45,7 +45,7 @@
 
 
 
-用户完成登录后，可以上传视频并在工作台管理解析任务；选择视频并输入分析目标后，Agent 会展示结构化结论、时间戳证据、执行计划、阶段轨迹与质量评估，并支持基于同一视频继续追问。
+用户完成登录后，可以上传视频并在工作台管理解析任务；选择视频并输入分析目标后，可以手动选择分析模式，也可以交给 Agent 自动判断。工作台会展示结构化结论、时间戳证据、执行计划、阶段轨迹与质量评估，并支持基于同一视频继续追问。
 
 ## 核心功能
 
@@ -80,6 +80,8 @@ Evidence frame_000125.jpg
 
 - **角色分工** — Planner 将用户目标拆成可执行任务，Executor 生成固定结构的结论、证据与建议。
 - **闭环校验** — Critic 检查目标覆盖、结构完整性与时间戳证据；不通过时依据缺失内容和时间范围定向重新检索。
+- **自动模式路由** — 根据用户目标自动选择通用、学习、审查或创作模式；路由不可用时回退通用模式，不阻断分析任务。
+- **四类结构化产物** — 通用模式生成结论与建议，学习模式生成大纲、自测题与易错点，审查模式定位逻辑漏洞与存疑结论，创作模式提取爆点、标题与口播脚本。
 - **成本可控** — AgentLoop 最多执行两轮，既允许定向修正，也通过轮次上限约束延迟与 Token 成本。
 
 ### 🔍 长视频检索与断点恢复
@@ -141,7 +143,7 @@ sequenceDiagram
 | :--- | :--- | :--- |
 | Web | Vue 3、Vite、SSE、Marked | 上传、Agent 工作台、实时进度与安全 Markdown 展示 |
 | API | Java 21、Spring Boot 3.5.9、Undertow、MyBatis-Plus | 鉴权、媒体管理、任务编排与 REST API |
-| 异步与缓存 | RocketMQ 4.9.4、Redis 7.4、Redisson | 异步削峰、状态缓存、限流、锁与消费幂等 |
+| 异步与缓存 | RocketMQ 5.3.2、Redis 7.4、Redisson | 异步削峰、状态缓存、限流、锁与消费幂等 |
 | 数据与存储 | MySQL 8、MinIO、Qdrant | 业务数据、视频对象、Checkpoint 与向量检索 |
 | 视频与 AI | FFmpeg、Tesseract、LangChain4j、DeepSeek、TeleSpeechASR、BGE-M3 | 音视频处理、多模态解析、Agent 推理与 Embedding |
 | 部署 | Docker Compose | 本地中间件编排 |

@@ -74,6 +74,19 @@ public class AgentLoopService {
      */
     public AgentState run(Long mediaId, VideoContext context, ModeProfile profile) {
         validateContext(context);
+        try (AgentExecutionBudget.Scope ignored = AgentExecutionBudget.open(maxDurationMs)) {
+            return runWithinBudget(mediaId, context, profile);
+        } catch (BudgetExceededException e) {
+            throw e;
+        } catch (RuntimeException e) {
+            AgentExecutionBudget.DeadlineExceededException deadline = findDeadline(e);
+            if (deadline == null) throw e;
+            telemetry.incrementCurrent("budgetTerminations", 1);
+            throw new BudgetExceededException(deadline.getMessage(), e);
+        }
+    }
+
+    private AgentState runWithinBudget(Long mediaId, VideoContext context, ModeProfile profile) {
         long runStartedNanos = System.nanoTime();
         AgentState savedState = mediaId == null ? null
                 : checkpointService.loadCriticState(mediaId, context.userGoal(), modeOf(profile));
@@ -430,6 +443,7 @@ public class AgentLoopService {
     }
 
     private void checkBudget(long startedNanos, String completedStage) {
+        AgentExecutionBudget.check(completedStage);
         long elapsedMs = (System.nanoTime() - startedNanos) / 1_000_000;
         AgentTelemetry.BudgetUsage usage = telemetry.currentUsage();
         String reason = null;
@@ -449,6 +463,22 @@ public class AgentLoopService {
         public BudgetExceededException(String message) {
             super(message);
         }
+
+        public BudgetExceededException(String message, Throwable cause) {
+            super(message, cause);
+        }
+    }
+
+    private AgentExecutionBudget.DeadlineExceededException findDeadline(Throwable error) {
+        Throwable current = error;
+        for (int depth = 0; current != null && depth < 16; depth++) {
+            if (current instanceof AgentExecutionBudget.DeadlineExceededException deadline) {
+                return deadline;
+            }
+            if (current.getCause() == current) break;
+            current = current.getCause();
+        }
+        return null;
     }
 
     private AgentState.CriticResult normalizeCritique(AgentState.CriticResult critique) {

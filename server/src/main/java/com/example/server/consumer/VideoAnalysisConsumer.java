@@ -117,7 +117,9 @@ public class VideoAnalysisConsumer implements RocketMQListener<AnalysisTaskMsg> 
                     TaskStatus.of(TaskStatus.State.PROCESSING, "视频分析任务开始执行"),
                     TaskStage.CONSUMING);
             if (msg.isRevision()) {
-                checkpointService.beginStagedRevision(mediaId, msg.getUserGoal(), mode);
+                if (!checkpointService.beginStagedRevision(mediaId, msg.getUserGoal(), mode)) {
+                    throw new IllegalStateException("修订任务状态不存在，等待消息队列重试");
+                }
                 redisTemplate.delete(completedKey);
             } else {
                 String completedMediaId = redisTemplate.opsForValue().get(completedKey);
@@ -137,6 +139,9 @@ public class VideoAnalysisConsumer implements RocketMQListener<AnalysisTaskMsg> 
             }
             saveStage(mediaId, msg.getUserGoal(), mode, TaskStage.CONSUMING);
             aiService.asyncAnalyze(mediaId, msg.getUserGoal(), mode);
+            if (msg.isRevision()) {
+                checkpointService.completeStagedRevision(mediaId, msg.getUserGoal(), mode);
+            }
             if (!mediaService.exists(mediaId)) {
                 mediaService.purgeRuntimeArtifacts(mediaId);
                 log.info("video_analysis_cleanup_after_media_deleted mediaId={}", mediaId);

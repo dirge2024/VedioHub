@@ -30,6 +30,9 @@ public interface AgentCheckpointMapper {
     @Delete("DELETE FROM agent_checkpoints WHERE media_id = #{mediaId} AND checkpoint_key LIKE CONCAT(#{prefix}, '%')")
     void deleteByPrefix(@Param("mediaId") Long mediaId, @Param("prefix") String prefix);
 
+    @Delete("DELETE FROM agent_checkpoints WHERE media_id = #{mediaId} AND checkpoint_key = #{checkpointKey}")
+    void delete(@Param("mediaId") Long mediaId, @Param("checkpointKey") String checkpointKey);
+
     @Delete("DELETE FROM agent_checkpoints WHERE media_id = #{mediaId}")
     void deleteByMediaId(@Param("mediaId") Long mediaId);
 }

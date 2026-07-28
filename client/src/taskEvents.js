@@ -1,4 +1,5 @@
-import { apiRequest } from './api'
+import { apiRequest } from './api.js'
+import { isTerminalStatus } from './taskEventsPolicy.js'
 
 /**
  * 后台任务的 SSE 连接池。
@@ -106,14 +107,6 @@ export function createTaskStreams({ onActiveChange = () => {} } = {}) {
     stopMedia,
     stopAll
   }
-}
-
-/**
- * 判断是否为不可恢复的错误：4xx 中除 408（请求超时）与 429（限流）之外都不会自愈，
- * 重连无意义；网络错误、408、429 与 5xx 仍走指数退避重连。
- */
-function isTerminalStatus(status) {
-  return status >= 400 && status < 500 && status !== 408 && status !== 429
 }
 
 function waitForRetry(delay, signal) {

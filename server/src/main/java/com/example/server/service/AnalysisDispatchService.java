@@ -59,12 +59,13 @@ public class AnalysisDispatchService {
     }
 
     public SubmissionResult submit(MediaFile mediaFile, String goal, AgentFeedback revision, AnalysisMode mode) {
+        AnalysisMode resolvedMode = mode == null ? AnalysisMode.GENERAL : mode;
         Long mediaId = mediaFile.getId();
         String action = revision == null
                 ? AnalysisTaskMsg.START_ANALYSIS
                 : AnalysisTaskMsg.REVISE_ANALYSIS;
         String contentHash = revision == null ? contentHash(mediaId) : "media-" + mediaId;
-        String goalDigest = AnalysisTaskKeys.goalDigest(goal, mode);
+        String goalDigest = AnalysisTaskKeys.goalDigest(goal, resolvedMode);
         String activeKey = AnalysisTaskKeys.active(contentHash, goalDigest);
         Boolean accepted = redisTemplate.opsForValue().setIfAbsent(
                 activeKey, String.valueOf(mediaId), ACTIVE_TTL);
@@ -76,20 +77,19 @@ public class AnalysisDispatchService {
                 return SubmissionResult.RATE_LIMITED;
             }
             // 旧结果先留着。消费者真正接手后再切 Checkpoint，MQ 投递失败时用户还有结果可看。
-            if (revision != null) aiService.stageRevision(revision, mode);
+            if (revision != null) aiService.stageRevision(revision, resolvedMode);
             rocketMQTemplate.convertAndSend(
                     analysisTopic,
-                    new AnalysisTaskMsg(mediaId, action, contentHash, goal,
-                            (mode == null ? AnalysisMode.GENERAL : mode).name()));
+                    new AnalysisTaskMsg(mediaId, action, contentHash, goal, resolvedMode.name()));
         } catch (RuntimeException e) {
             redisTemplate.delete(activeKey);
-            if (revision != null) aiService.cancelStagedRevision(mediaId, goal, mode);
+            if (revision != null) aiService.cancelStagedRevision(mediaId, goal, resolvedMode);
             log.error("analysis_dispatch_failed mediaId={} userId={}", mediaId, mediaFile.getUserId(), e);
             return SubmissionResult.FAILED;
         }
 
         try {
-            taskEventService.publishAnalysis(mediaId, goal,
+            taskEventService.publishAnalysis(mediaId, goal, resolvedMode,
                     TaskStatus.of(TaskStatus.State.QUEUED, "任务已进入异步分析队列"), TaskStage.QUEUED);
         } catch (RuntimeException eventError) {
             // MQ 已经接单，通知失败不能把任务伪装成投递失败。

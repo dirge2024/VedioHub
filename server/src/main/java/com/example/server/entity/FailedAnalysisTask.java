@@ -15,6 +15,7 @@ public class FailedAnalysisTask {
     private Long id;
     private Long mediaId;
     private String action;
+    private String mode;
     private String contentHash;
     private String userGoal;
     private Integer attemptCount;

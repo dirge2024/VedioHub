@@ -1,5 +1,6 @@
 package com.example.server.service;
 
+import com.example.server.dto.AnalysisMode;
 import com.example.server.dto.TaskEvent;
 import com.example.server.dto.TaskStatus;
 import com.example.server.dto.TaskStage;
@@ -45,7 +46,16 @@ public class TaskEventService implements MessageListener {
                                 String goal,
                                 TaskStatus initialStatus,
                                 TaskStage stage) {
-        String key = key(mediaId, type, goal);
+        return subscribe(mediaId, type, goal, AnalysisMode.GENERAL, initialStatus, stage);
+    }
+
+    public SseEmitter subscribe(Long mediaId,
+                                String type,
+                                String goal,
+                                AnalysisMode mode,
+                                TaskStatus initialStatus,
+                                TaskStage stage) {
+        String key = key(mediaId, type, goal, mode);
         SseEmitter emitter = new SseEmitter(STREAM_TIMEOUT_MS);
         subscribers.computeIfAbsent(key, ignored -> new CopyOnWriteArrayList<>()).add(emitter);
         emitter.onCompletion(() -> remove(key, emitter));
@@ -56,11 +66,19 @@ public class TaskEventService implements MessageListener {
     }
 
     public void publishAnalysis(Long mediaId, String goal, TaskStatus status, TaskStage stage) {
-        publish(key(mediaId, ANALYSIS, goal), TaskEvent.of(status, stage));
+        publishAnalysis(mediaId, goal, AnalysisMode.GENERAL, status, stage);
+    }
+
+    public void publishAnalysis(Long mediaId,
+                                String goal,
+                                AnalysisMode mode,
+                                TaskStatus status,
+                                TaskStage stage) {
+        publish(key(mediaId, ANALYSIS, goal, mode), TaskEvent.of(status, stage));
     }
 
     public void publishTranscription(Long mediaId, TaskStatus status, TaskStage stage) {
-        publish(key(mediaId, TRANSCRIPTION, ""), TaskEvent.of(status, stage));
+        publish(key(mediaId, TRANSCRIPTION, "", AnalysisMode.GENERAL), TaskEvent.of(status, stage));
     }
 
     private void publish(String key, TaskEvent event) {
@@ -116,8 +134,10 @@ public class TaskEventService implements MessageListener {
         });
     }
 
-    private String key(Long mediaId, String type, String goal) {
-        String suffix = ANALYSIS.equals(type) ? AnalysisTaskKeys.goalDigest(goal) : "default";
+    private String key(Long mediaId, String type, String goal, AnalysisMode mode) {
+        String suffix = ANALYSIS.equals(type)
+                ? AnalysisTaskKeys.goalDigest(goal, mode)
+                : "default";
         return type + ":" + mediaId + ":" + suffix;
     }
 }

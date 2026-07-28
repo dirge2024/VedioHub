@@ -80,7 +80,9 @@ public class AgentLoopService {
         boolean terminalCheckpoint = savedState != null && savedState.result() != null
                 && savedState.critique() != null
                 && (savedState.round() >= maxRounds || savedState.critique().passed());
-        if (terminalCheckpoint && isPlanValid(savedState.plan()) && isResultValid(savedState.result())) {
+        if (terminalCheckpoint
+                && isPlanValid(savedState.plan())
+                && isResultValid(savedState.result(), profile)) {
             checkpointService.saveResult(mediaId, savedState, modeOf(profile));
             telemetry.incrementCurrent("terminalCheckpointHits", 1);
             return savedState;
@@ -95,7 +97,7 @@ public class AgentLoopService {
         AgentState.AgentPlan plan = resolvePlan(mediaId, relevantContext, savedState, profile);
         checkBudget(runStartedNanos, "Planner");
         if (mediaId != null) {
-            taskEventService.publishAnalysis(mediaId, relevantContext.userGoal(),
+            taskEventService.publishAnalysis(mediaId, relevantContext.userGoal(), modeOf(profile),
                     TaskStatus.of(TaskStatus.State.PROCESSING, "Planner 已完成任务拆解"),
                     TaskStage.PLAN_COMPLETED);
         }
@@ -104,7 +106,7 @@ public class AgentLoopService {
                 : savedState;
         if (state.critique() != null && !state.critique().passed()) {
             relevantContext = contextForRetry(
-                    mediaId, context, relevantContext, state.critique());
+                    mediaId, context, relevantContext, state.critique(), profile);
             plan = revisePlanForRetry(mediaId, relevantContext, plan, state.critique(), profile);
         }
 
@@ -115,7 +117,7 @@ public class AgentLoopService {
             state = critiqueRound(mediaId, relevantContext, plan, state.result(), state.round(), profile);
             if (!state.critique().passed() && state.round() < maxRounds) {
                 relevantContext = contextForRetry(
-                        mediaId, context, relevantContext, state.critique());
+                        mediaId, context, relevantContext, state.critique(), profile);
                 plan = revisePlanForRetry(mediaId, relevantContext, plan, state.critique(), profile);
             }
         }
@@ -127,11 +129,11 @@ public class AgentLoopService {
             if (state.critique().passed()) break;
             if (round < maxRounds) {
                 relevantContext = contextForRetry(
-                        mediaId, context, relevantContext, state.critique());
+                        mediaId, context, relevantContext, state.critique(), profile);
                 plan = revisePlanForRetry(mediaId, relevantContext, plan, state.critique(), profile);
             }
         }
-        validateResult(state.result());
+        validateResult(state.result(), profile);
         if (mediaId != null) checkpointService.saveResult(mediaId, state, modeOf(profile));
         return state;
     }
@@ -150,7 +152,7 @@ public class AgentLoopService {
             shouldPersist = true;
         }
         if (!isPlanValid(plan)) {
-            plan = deepSeekUtils.repairPlan(context, plan);
+            plan = deepSeekUtils.repairPlan(context, plan, planInstruction(profile));
             telemetry.incrementCurrent("planStructureRepairs", 1);
             shouldPersist = true;
         }
@@ -168,14 +170,14 @@ public class AgentLoopService {
                                     int round,
                                     long runStartedNanos,
                                     ModeProfile profile) {
-        publishStage(mediaId, context.userGoal(), "Executor 正在按计划生成结构化产物",
-                TaskStage.EXECUTOR_STARTED);
+        publishStage(mediaId, context.userGoal(), modeOf(profile),
+                "Executor 正在按计划生成结构化产物", TaskStage.EXECUTOR_STARTED);
         AnalysisResult result = deepSeekUtils.execute(context, plan, previousCritique, executeInstruction(profile));
         AgentState draft = new AgentState(context.userGoal(), plan, result, null, round);
         if (mediaId != null) {
             checkpointService.saveExecutionState(mediaId, draft, modeOf(profile));
-            publishStage(mediaId, context.userGoal(), "Executor 草稿已保存，开始校验证据",
-                    TaskStage.EXECUTOR_COMPLETED);
+            publishStage(mediaId, context.userGoal(), modeOf(profile),
+                    "Executor 草稿已保存，开始校验证据", TaskStage.EXECUTOR_COMPLETED);
         }
         checkBudget(runStartedNanos, "Executor");
         return critiqueRound(mediaId, context, plan, result, round, profile);
@@ -187,11 +189,11 @@ public class AgentLoopService {
                                      AnalysisResult result,
                                      int round,
                                      ModeProfile profile) {
-        publishStage(mediaId, context.userGoal(), "Critic 正在核验目标覆盖与时间戳证据",
-                TaskStage.CRITIC_STARTED);
+        publishStage(mediaId, context.userGoal(), modeOf(profile),
+                "Critic 正在核验目标覆盖与时间戳证据", TaskStage.CRITIC_STARTED);
         AgentState.CriticResult critique = normalizeCritique(
                 deepSeekUtils.critique(context, plan, result, criticInstruction(profile)));
-        critique = enforceStructureBounds(result, critique);
+        critique = enforceStructureBounds(result, critique, profile);
         critique = enforceEvidenceBounds(context, result, critique);
         telemetry.incrementCurrent("criticRounds", 1);
         if (critique.passed()) telemetry.incrementCurrent("criticPassed", 1);
@@ -214,7 +216,7 @@ public class AgentLoopService {
                 message = "Critic 发现目标覆盖或结构问题，正在按反馈重写";
                 stage = TaskStage.CRITIC_RETRY_REQUIRED;
             }
-            publishStage(mediaId, context.userGoal(), message, stage);
+            publishStage(mediaId, context.userGoal(), modeOf(profile), message, stage);
         }
         return state;
     }
@@ -241,16 +243,27 @@ public class AgentLoopService {
                 task -> task == null || task.isBlank() || task.length() > 500);
     }
 
-    private void validateResult(AnalysisResult result) {
-        if (!isResultValid(result)) {
+    private void validateResult(AnalysisResult result, ModeProfile profile) {
+        if (!isResultValid(result, profile)) {
             throw new IllegalStateException("Executor 未生成完整结构化结果");
         }
     }
 
-    private boolean isResultValid(AnalysisResult result) {
-        return result != null && result.title() != null && !result.title().isBlank()
+    private boolean isResultValid(AnalysisResult result, ModeProfile profile) {
+        boolean commonFieldsValid = result != null
+                && result.title() != null && !result.title().isBlank()
                 && result.conclusions() != null && !result.conclusions().isEmpty()
                 && result.evidence() != null && !result.evidence().isEmpty();
+        if (!commonFieldsValid || profile == null || profile.requiredSectionKeys().isEmpty()) {
+            return commonFieldsValid;
+        }
+        List<String> presentKeys = result.sections().stream()
+                .filter(section -> section != null && section.key() != null
+                        && !section.key().isBlank() && !section.items().isEmpty())
+                .map(section -> section.key().trim())
+                .distinct()
+                .toList();
+        return presentKeys.containsAll(profile.requiredSectionKeys());
     }
 
     private AgentState.CriticResult enforceEvidenceBounds(VideoContext context,
@@ -312,7 +325,8 @@ public class AgentLoopService {
     }
 
     private AgentState.CriticResult enforceStructureBounds(AnalysisResult result,
-                                                            AgentState.CriticResult critique) {
+                                                            AgentState.CriticResult critique,
+                                                            ModeProfile profile) {
         critique = normalizeCritique(critique);
         List<String> feedback = new ArrayList<>(critique.feedback());
         if (result == null || result.title() == null || result.title().isBlank()) {
@@ -323,6 +337,10 @@ public class AgentLoopService {
         }
         if (result == null || result.evidence() == null || result.evidence().isEmpty()) {
             feedback.add("为核心结论补充带时间戳的 ASR 或 OCR 证据");
+        }
+        List<String> missingSections = missingSectionKeys(result, profile);
+        if (!missingSections.isEmpty()) {
+            feedback.add("补充当前分析模式要求的结构化段落: " + String.join(", ", missingSections));
         }
         if (feedback.equals(critique.feedback())) return critique;
         return new AgentState.CriticResult(
@@ -336,7 +354,8 @@ public class AgentLoopService {
     private VideoContext contextForRetry(Long mediaId,
                                          VideoContext fullContext,
                                          VideoContext selectedContext,
-                                         AgentState.CriticResult critique) {
+                                         AgentState.CriticResult critique,
+                                         ModeProfile profile) {
         if (!requiresEvidenceRefresh(critique)) {
             telemetry.incrementCurrent("criticRewriteOnlyRetries", 1);
             return selectedContext;
@@ -344,8 +363,8 @@ public class AgentLoopService {
         telemetry.incrementCurrent("criticEvidenceRefreshes", 1);
         VideoContext refined = longVideoContextService.refineForCritique(
                 mediaId, fullContext, selectedContext, critique);
-        publishStage(mediaId, fullContext.userGoal(), "已按 Critic 反馈补充定向证据",
-                TaskStage.EVIDENCE_REFRESHED);
+        publishStage(mediaId, fullContext.userGoal(), modeOf(profile),
+                "已按 Critic 反馈补充定向证据", TaskStage.EVIDENCE_REFRESHED);
         return refined;
     }
 
@@ -364,12 +383,13 @@ public class AgentLoopService {
         if (critique == null || safeList(critique.missingRequirements()).isEmpty()) return currentPlan;
 
         try {
-            AgentState.AgentPlan revisedPlan = deepSeekUtils.replan(context, currentPlan, critique);
+            AgentState.AgentPlan revisedPlan = deepSeekUtils.replan(
+                    context, currentPlan, critique, planInstruction(profile));
             validatePlan(revisedPlan);
             telemetry.incrementCurrent("planRevisions", 1);
             if (mediaId != null) {
                 checkpointService.savePlan(mediaId, context.userGoal(), modeOf(profile), revisedPlan);
-                taskEventService.publishAnalysis(mediaId, context.userGoal(),
+                taskEventService.publishAnalysis(mediaId, context.userGoal(), modeOf(profile),
                         TaskStatus.of(TaskStatus.State.PROCESSING, "Planner 根据 Critic 反馈补充了遗漏任务"),
                         TaskStage.PLAN_COMPLETED);
             }
@@ -381,10 +401,32 @@ public class AgentLoopService {
         }
     }
 
-    private void publishStage(Long mediaId, String goal, String message, TaskStage stage) {
+    private void publishStage(Long mediaId,
+                              String goal,
+                              AnalysisMode mode,
+                              String message,
+                              TaskStage stage) {
         if (mediaId == null) return;
-        taskEventService.publishAnalysis(mediaId, goal,
+        taskEventService.publishAnalysis(mediaId, goal, mode,
                 TaskStatus.of(TaskStatus.State.PROCESSING, message), stage);
+    }
+
+    private List<String> missingSectionKeys(AnalysisResult result, ModeProfile profile) {
+        if (profile == null || profile.requiredSectionKeys().isEmpty()) return List.of();
+        List<String> presentKeys = result == null || result.sections() == null
+                ? List.of()
+                : result.sections().stream()
+                        .filter(section -> section != null
+                                && section.key() != null
+                                && !section.key().isBlank()
+                                && section.items() != null
+                                && !section.items().isEmpty())
+                        .map(section -> section.key().trim())
+                        .distinct()
+                        .toList();
+        return profile.requiredSectionKeys().stream()
+                .filter(required -> !presentKeys.contains(required))
+                .toList();
     }
 
     private void checkBudget(long startedNanos, String completedStage) {

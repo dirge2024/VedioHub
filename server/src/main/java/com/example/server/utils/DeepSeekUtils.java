@@ -78,6 +78,13 @@ public class DeepSeekUtils {
     public AgentState.AgentPlan replan(VideoContext context,
                                        AgentState.AgentPlan currentPlan,
                                        AgentState.CriticResult critique) {
+        return replan(context, currentPlan, critique, "");
+    }
+
+    public AgentState.AgentPlan replan(VideoContext context,
+                                       AgentState.AgentPlan currentPlan,
+                                       AgentState.CriticResult critique,
+                                       String modeInstruction) {
         try {
             String prompt = """
                     你是 Video Agent 的 Planner。Critic 发现当前计划遗漏了用户要求，请修订计划。
@@ -95,7 +102,8 @@ public class DeepSeekUtils {
                     """ + objectMapper.writeValueAsString(critique) + """
 
                     VideoContext:
-                    """ + objectMapper.writeValueAsString(context);
+                    """ + objectMapper.writeValueAsString(context)
+                    + modeSuffix("本次分析模式的额外拆解要求：", modeInstruction);
             return structuredChat("REPLANNER", prompt, AgentState.AgentPlan.class);
         } catch (Exception e) {
             throw new IllegalStateException("Agent 任务重规划失败", e);
@@ -104,6 +112,12 @@ public class DeepSeekUtils {
 
     public AgentState.AgentPlan repairPlan(VideoContext context,
                                            AgentState.AgentPlan invalidPlan) {
+        return repairPlan(context, invalidPlan, "");
+    }
+
+    public AgentState.AgentPlan repairPlan(VideoContext context,
+                                           AgentState.AgentPlan invalidPlan,
+                                           String modeInstruction) {
         try {
             String prompt = """
                     你是 Video Agent 的 Planner。上一份计划 JSON 可以解析，但业务结构不完整。
@@ -117,7 +131,8 @@ public class DeepSeekUtils {
                     """ + objectMapper.writeValueAsString(invalidPlan) + """
 
                     VideoContext:
-                    """ + objectMapper.writeValueAsString(context);
+                    """ + objectMapper.writeValueAsString(context)
+                    + modeSuffix("本次分析模式的额外拆解要求：", modeInstruction);
             return structuredChat("PLANNER_REPAIR", prompt, AgentState.AgentPlan.class);
         } catch (Exception e) {
             throw new IllegalStateException("Agent 任务计划修复失败", e);

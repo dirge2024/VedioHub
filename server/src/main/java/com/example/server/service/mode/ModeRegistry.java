@@ -4,6 +4,7 @@ import com.example.server.dto.AnalysisMode;
 import org.springframework.stereotype.Component;
 
 import java.util.EnumMap;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -23,7 +24,7 @@ public class ModeRegistry {
     public ModeRegistry() {
         // 默认模式:空指令 = 完全等于现有行为,作为兜底
         register(new ModeProfile(AnalysisMode.GENERAL, "通用分析",
-                "", "", "", false));
+                "", "", "", List.of()));
 
         // 学习模式:强化知识结构化
         register(new ModeProfile(AnalysisMode.LEARNING, "学习复习",
@@ -32,7 +33,7 @@ public class ModeRegistry {
                         + "key=outline 知识点大纲、key=keypoints 重点难点、"
                         + "key=quiz 自测题(每题附答案)、key=pitfalls 易错点。",
                 "额外检查:知识点是否成体系、讲解是否有跳步、自测题是否覆盖核心概念。",
-                false));
+                List.of("outline", "keypoints", "quiz", "pitfalls")));
 
         // 审查模式:强化 Critic 质疑
         register(new ModeProfile(AnalysisMode.REVIEW, "内容审查",
@@ -42,7 +43,7 @@ public class ModeRegistry {
                         + "key=omissions 遗漏点、key=doubtful 存疑结论(附理由)。",
                 "以更严格的门槛质疑:论据是否充分、有无偷换概念、结论是否被证据支持;"
                         + "证据不足时必须判定不通过。",
-                true));
+                List.of("fallacies", "exaggerations", "omissions", "doubtful")));
 
         // 创作模式:强化时间戳爆点定位
         register(new ModeProfile(AnalysisMode.CREATION, "内容创作",
@@ -51,7 +52,7 @@ public class ModeRegistry {
                         + "key=highlights 爆点片段(每条含起止时间戳)、key=titles 备选标题、"
                         + "key=intro 简介文案、key=script 口播脚本要点。",
                 "检查每个爆点是否有真实时间戳支撑、文案是否贴合视频实际内容,不得虚构。",
-                true));
+                List.of("highlights", "titles", "intro", "script")));
 
         // 启动自检:每个 AnalysisMode 都必须注册 Profile。否则该模式在写端(AgentLoop 用
         // of(mode).mode())会回退成 GENERAL 键,而读端(status/asyncAnalyze)仍用该模式键,

@@ -1,5 +1,6 @@
 package com.example.server.service;
 
+import com.example.server.dto.AnalysisMode;
 import com.example.server.utils.AnalysisTaskKeys;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -39,7 +40,12 @@ public class AgentTelemetry {
     }
 
     public String start(Long taskId, String goal) {
-        String taskKey = taskKey(taskId, goal);
+        return start(taskId, goal, AnalysisMode.GENERAL);
+    }
+
+    public String start(Long taskId, String goal, AnalysisMode mode) {
+        String goalDigest = AnalysisTaskKeys.goalDigest(goal, mode);
+        String taskKey = taskKey(taskId, goalDigest);
         if (traces.size() >= MAX_TRACES) {
             traces.values().stream()
                     .min(Comparator.comparing(trace -> trace.startedAt))
@@ -49,7 +55,7 @@ public class AgentTelemetry {
                     });
         }
         String traceId = UUID.randomUUID().toString();
-        traces.put(traceId, new TraceData(traceId, taskId, AnalysisTaskKeys.goalDigest(goal), taskKey));
+        traces.put(traceId, new TraceData(traceId, taskId, goalDigest, taskKey));
         latestTraceByTask.put(taskKey, traceId);
         currentTrace.set(traceId);
         persist(traces.get(traceId));
@@ -139,14 +145,19 @@ public class AgentTelemetry {
     public record BudgetUsage(long estimatedTokens, double estimatedCost) { }
 
     public Map<String, Object> latest(Long taskId, String goal) {
-        String taskKey = taskKey(taskId, goal);
+        return latest(taskId, goal, AnalysisMode.GENERAL);
+    }
+
+    public Map<String, Object> latest(Long taskId, String goal, AnalysisMode mode) {
+        String goalDigest = AnalysisTaskKeys.goalDigest(goal, mode);
+        String taskKey = taskKey(taskId, goalDigest);
         String traceId = latestTraceByTask.get(taskKey);
         TraceData trace = traceId == null ? null : traces.get(traceId);
         if (trace != null) return trace.snapshot();
         try {
             if (traceId == null) {
                 traceId = redisTemplate.opsForValue().get(
-                        latestTraceKey(taskId, AnalysisTaskKeys.goalDigest(goal)));
+                        latestTraceKey(taskId, goalDigest));
             }
             String snapshot = traceId == null ? null : redisTemplate.opsForValue().get(traceKey(traceId));
             return snapshot == null
@@ -209,8 +220,8 @@ public class AgentTelemetry {
         return "agent:trace:task:" + taskId + ":goals";
     }
 
-    private String taskKey(Long taskId, String goal) {
-        return taskId + ":" + AnalysisTaskKeys.goalDigest(goal);
+    private String taskKey(Long taskId, String goalDigest) {
+        return taskId + ":" + goalDigest;
     }
 
     private long estimateTokens(String text) {

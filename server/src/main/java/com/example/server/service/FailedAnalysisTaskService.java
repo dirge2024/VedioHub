@@ -1,6 +1,7 @@
 package com.example.server.service;
 
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
+import com.example.server.dto.AnalysisMode;
 import com.example.server.dto.AnalysisTaskMsg;
 import com.example.server.dto.TaskStatus;
 import com.example.server.dto.TaskStage;
@@ -62,6 +63,7 @@ public class FailedAnalysisTaskService {
         // 这里补占位值并按列宽截断：写台账本身失败的话，失败任务就彻底没有排查抓手了。
         task.setMediaId(message.getMediaId() == null ? UNKNOWN_MEDIA_ID : message.getMediaId());
         task.setAction(column(message.getAction(), "UNKNOWN", 32));
+        task.setMode(AnalysisMode.fromNullable(message.getMode()).name());
         task.setContentHash(column(message.getContentHash(), "unknown", 128));
         task.setUserGoal(column(message.getUserGoal(), "(消息缺少分析目标)", 500));
         task.setAttemptCount((int) attempts);
@@ -104,8 +106,9 @@ public class FailedAnalysisTaskService {
             throw new IllegalArgumentException("该记录来自非法任务消息，缺少可重放的原始参数");
         }
 
+        AnalysisMode mode = AnalysisMode.fromNullable(task.getMode());
         String contentHash = AnalysisTaskKeys.normalizeContentHash(task.getMediaId(), task.getContentHash());
-        String goalDigest = AnalysisTaskKeys.goalDigest(task.getUserGoal());
+        String goalDigest = AnalysisTaskKeys.goalDigest(task.getUserGoal(), mode);
         String activeKey = AnalysisTaskKeys.active(contentHash, goalDigest);
         Boolean accepted = redisTemplate.opsForValue().setIfAbsent(
                 activeKey, String.valueOf(task.getMediaId()), ACTIVE_TTL);
@@ -115,7 +118,7 @@ public class FailedAnalysisTaskService {
         try {
             redisTemplate.delete(AnalysisTaskKeys.attempts(contentHash, goalDigest));
             rocketMQTemplate.convertAndSend(analysisTopic, new AnalysisTaskMsg(
-                    task.getMediaId(), task.getAction(), contentHash, task.getUserGoal()));
+                    task.getMediaId(), task.getAction(), contentHash, task.getUserGoal(), mode.name()));
             dispatched = true;
             task.setStatus(STATUS_REQUEUED);
             task.setUpdatedAt(LocalDateTime.now());
@@ -134,7 +137,7 @@ public class FailedAnalysisTaskService {
         }
 
         try {
-            taskEventService.publishAnalysis(task.getMediaId(), task.getUserGoal(),
+            taskEventService.publishAnalysis(task.getMediaId(), task.getUserGoal(), mode,
                     TaskStatus.of(TaskStatus.State.QUEUED, "失败任务已由管理员重新入队"),
                     TaskStage.MANUAL_REPLAY);
         } catch (RuntimeException eventError) {

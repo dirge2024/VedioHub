@@ -77,7 +77,8 @@ public class AiService {
     }
 
     public void asyncAnalyze(Long mediaId, String userGoal, AnalysisMode mode) {
-        String traceId = telemetry.start(mediaId, userGoal);
+        AnalysisMode resolvedMode = mode == null ? AnalysisMode.GENERAL : mode;
+        String traceId = telemetry.start(mediaId, userGoal, resolvedMode);
         telemetry.bind(traceId);
         TaskStage currentStage = TaskStage.VIDEO_CONTEXT;
         MediaFile mediaFile = mediaFileMapper.selectById(mediaId);
@@ -90,22 +91,22 @@ public class AiService {
         try {
             // Checkpoint 键 = (mediaId, goalDigest(goal, mode)):不同模式的同一目标互不串键,
             // 因此这里带 mode 读取,不会误取别的模式已完成的结果。
-            AgentState agentState = checkpointService.loadResult(mediaId, userGoal, mode);
+            AgentState agentState = checkpointService.loadResult(mediaId, userGoal, resolvedMode);
             if (agentState != null && agentState.result() != null) {
                 persistResult(mediaFile, agentState);
                 telemetry.increment(traceId, "checkpointHits", 1);
                 return;
             }
 
-            VideoContext videoContext = resolveContext(mediaFile, userGoal, traceId);
+            VideoContext videoContext = resolveContext(mediaFile, userGoal, traceId, resolvedMode);
             mediaFile.setTranscriptText(videoContext.transcriptText());
             currentStage = TaskStage.AGENT_LOOP;
-            taskEventService.publishAnalysis(mediaId, userGoal,
+            taskEventService.publishAnalysis(mediaId, userGoal, resolvedMode,
                     TaskStatus.of(TaskStatus.State.PROCESSING, "多模态上下文已就绪，Agent 开始分析"),
                     TaskStage.AGENT_LOOP);
             long agentStarted = System.nanoTime();
             try {
-                agentState = agentLoopService.run(mediaId, videoContext, modeRegistry.of(mode));
+                agentState = agentLoopService.run(mediaId, videoContext, modeRegistry.of(resolvedMode));
                 telemetry.stage(traceId, TaskStage.AGENT_LOOP.name(), agentStarted, true);
             } catch (RuntimeException e) {
                 telemetry.stage(traceId, TaskStage.AGENT_LOOP.name(), agentStarted, false);
@@ -116,7 +117,7 @@ public class AiService {
                     traceId, mediaId, agentState.round());
         } catch (Exception e) {
             try {
-                checkpointService.saveFailure(mediaId, userGoal, mode, currentStage, e);
+                checkpointService.saveFailure(mediaId, userGoal, resolvedMode, currentStage, e);
             } catch (RuntimeException checkpointError) {
                 e.addSuppressed(checkpointError);
                 log.error("agent_failure_checkpoint_write_failed traceId={} mediaId={}",
@@ -140,7 +141,10 @@ public class AiService {
      * 复用：同一个视频换个分析目标、或被不同用户重复上传，都不该再烧一遍算力与第三方额度。
      * 复用顺序为：本 mediaId 检查点 → 内容级检查点 → 加内容锁后真正构建。
      */
-    private VideoContext resolveContext(MediaFile mediaFile, String userGoal, String traceId) {
+    private VideoContext resolveContext(MediaFile mediaFile,
+                                        String userGoal,
+                                        String traceId,
+                                        AnalysisMode mode) {
         VideoContext checkpoint = checkpointService.loadContext(mediaFile.getId());
         if (checkpoint != null) {
             telemetry.increment(traceId, "contextCheckpointHits", 1);
@@ -177,7 +181,7 @@ public class AiService {
                         mediaFile.getId(), contentHash, CONTEXT_LOCK_WAIT_SECONDS);
                 throw new IllegalStateException("同一视频的上下文正在构建中，稍后重试");
             }
-            return buildContext(mediaFile, userGoal, traceId, contentHash);
+            return buildContext(mediaFile, userGoal, traceId, contentHash, mode);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new IllegalStateException("等待视频上下文构建锁被中断", e);
@@ -212,8 +216,9 @@ public class AiService {
     private VideoContext buildContext(MediaFile mediaFile,
                                       String userGoal,
                                       String traceId,
-                                      String contentHash) {
-        taskEventService.publishAnalysis(mediaFile.getId(), userGoal,
+                                      String contentHash,
+                                      AnalysisMode mode) {
+        taskEventService.publishAnalysis(mediaFile.getId(), userGoal, mode,
                 TaskStatus.of(TaskStatus.State.PROCESSING, "正在并行提取语音与关键帧"),
                 TaskStage.VIDEO_CONTEXT);
         long started = System.nanoTime();
@@ -261,18 +266,27 @@ public class AiService {
     }
 
     public String followUp(Long mediaId, String originalGoal, String question) {
+        return followUp(mediaId, originalGoal, question, AnalysisMode.GENERAL);
+    }
+
+    public String followUp(Long mediaId,
+                           String originalGoal,
+                           String question,
+                           AnalysisMode mode) {
+        AnalysisMode resolvedMode = mode == null ? AnalysisMode.GENERAL : mode;
         VideoContext context = checkpointService.loadContext(mediaId);
         if (context == null) throw new VideoContextNotReadyException();
 
-        String traceId = telemetry.start(mediaId, question);
+        String traceId = telemetry.start(mediaId, question, resolvedMode);
         telemetry.bind(traceId);
         try {
             AgentState previous = originalGoal == null
-                    ? null : checkpointService.loadResult(mediaId, originalGoal);
+                    ? null : checkpointService.loadResult(mediaId, originalGoal, resolvedMode);
             String followUpGoal = contextualQuestion(originalGoal, previous, question);
             VideoContext followUpContext = new VideoContext(
                     context.source(), followUpGoal, context.segments());
-            return agentLoopService.run(mediaId, followUpContext).result().toMarkdown();
+            return agentLoopService.run(
+                    mediaId, followUpContext, modeRegistry.of(resolvedMode)).result().toMarkdown();
         } finally {
             telemetry.flush(traceId);
             telemetry.clear();
@@ -308,7 +322,8 @@ public class AiService {
     }
 
     public void stageRevision(AgentFeedback feedback, AnalysisMode mode) {
-        AgentFeedback normalized = feedback.normalized();
+        AnalysisMode resolvedMode = mode == null ? AnalysisMode.GENERAL : mode;
+        AgentFeedback normalized = feedback.normalized(resolvedMode);
         checkpointService.saveFeedback(normalized);
 
         String goal = normalized.correctedGoal() == null || normalized.correctedGoal().isBlank()
@@ -317,7 +332,7 @@ public class AiService {
         AgentState.AgentPlan correctedPlan = normalized.correctedTasks().isEmpty()
                 ? null
                 : new AgentState.AgentPlan(goal, normalized.correctedTasks());
-        checkpointService.stageRevision(normalized.mediaId(), goal, mode, correctedPlan);
+        checkpointService.stageRevision(normalized.mediaId(), goal, resolvedMode, correctedPlan);
     }
 
     public String revisionGoal(AgentFeedback feedback) {

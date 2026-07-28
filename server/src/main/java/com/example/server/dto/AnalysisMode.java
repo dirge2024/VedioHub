@@ -33,4 +33,17 @@ public enum AnalysisMode {
             return GENERAL;
         }
     }
+
+    /**
+     * 解析来自 HTTP 请求的模式。请求缺省仍兼容 GENERAL，但显式传错模式时直接拒绝，
+     * 避免用户选择 REVIEW 却因拼写错误静默执行成 GENERAL。
+     */
+    public static AnalysisMode fromRequest(String value) {
+        if (value == null || value.isBlank()) return GENERAL;
+        try {
+            return valueOf(value.trim().toUpperCase(Locale.ROOT));
+        } catch (IllegalArgumentException e) {
+            throw new IllegalArgumentException("不支持的分析模式: " + value);
+        }
+    }
 }

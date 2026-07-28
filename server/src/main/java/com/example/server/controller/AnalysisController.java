@@ -6,6 +6,7 @@ import com.example.server.dto.AgentFeedback;
 import com.example.server.dto.AgentState;
 import com.example.server.dto.AnalysisMode;
 import com.example.server.dto.RouteDecision;
+import com.example.server.dto.RouteRequest;
 import com.example.server.dto.TaskStatus;
 import com.example.server.dto.VideoEvidenceHit;
 import com.example.server.entity.MediaFile;
@@ -79,11 +80,12 @@ public class AnalysisController {
      * 前端拿到后即以该模式发起真正的分析请求,使提交、状态查询、重跑共用同一套任务身份 key。
      * 路由本身永不失败:内部异常会安全回退到 GENERAL。
      */
-    @GetMapping("/route")
+    @PostMapping("/route")
     public Result<RouteDecision> route(
-            @RequestParam String goal,
+            @Valid @RequestBody RouteRequest request,
             @RequestAttribute(AuthService.REQUEST_USER_ID) Long userId) {
-        return Result.ok(modeRouter.route(normalizeText(goal, "分析目标")));
+        return Result.ok(modeRouter.route(
+                normalizeText(request.goal(), "分析目标"), userId));
     }
 
     @PostMapping("/ai")
@@ -93,7 +95,7 @@ public class AnalysisController {
             @RequestParam(required = false) String mode,
             @RequestAttribute(AuthService.REQUEST_USER_ID) Long userId) {
         String normalizedGoal = normalizeText(goal, "分析目标");
-        AnalysisMode analysisMode = AnalysisMode.fromNullable(mode);
+        AnalysisMode analysisMode = AnalysisMode.fromRequest(mode);
         MediaFile mediaFile = mediaService.requireOwnedMedia(id, userId);
         if (checkpointService.loadResult(id, normalizedGoal, analysisMode) != null) {
             // 已有可复用结果，是“已完成”而非“已受理”，用 200 与异步受理区分开。
@@ -107,12 +109,14 @@ public class AnalysisController {
             @RequestParam Long id,
             @RequestParam String question,
             @RequestParam(required = false) String goal,
+            @RequestParam(required = false) String mode,
             @RequestAttribute(AuthService.REQUEST_USER_ID) Long userId) {
         String normalizedQuestion = normalizeText(question, "追问内容");
         String normalizedGoal = goal == null || goal.isBlank()
                 ? null : normalizeText(goal, "原始分析目标");
         mediaService.requireOwnedMedia(id, userId);
-        return Result.ok(aiService.followUp(id, normalizedGoal, normalizedQuestion));
+        return Result.ok(aiService.followUp(
+                id, normalizedGoal, normalizedQuestion, AnalysisMode.fromRequest(mode)));
     }
 
     @GetMapping("/evidence-search")
@@ -130,7 +134,8 @@ public class AnalysisController {
             @RequestAttribute(AuthService.REQUEST_USER_ID) Long userId) {
         ensureRating(feedback);
         mediaService.requireOwnedMedia(feedback.mediaId(), userId);
-        checkpointService.saveFeedback(feedback.normalized());
+        checkpointService.saveFeedback(
+                feedback.normalized(AnalysisMode.fromRequest(feedback.mode())));
         return Result.ok();
     }
 
@@ -143,7 +148,7 @@ public class AnalysisController {
         MediaFile mediaFile = mediaService.requireOwnedMedia(feedback.mediaId(), userId);
         String revisedGoal = aiService.revisionGoal(feedback);
         return submissionResponse(
-                dispatchService.submit(mediaFile, revisedGoal, feedback, AnalysisMode.fromNullable(mode)));
+                dispatchService.submit(mediaFile, revisedGoal, feedback, AnalysisMode.fromRequest(mode)));
     }
 
     @GetMapping("/agent-feedback")
@@ -162,7 +167,7 @@ public class AnalysisController {
             @RequestAttribute(AuthService.REQUEST_USER_ID) Long userId) {
         mediaService.requireOwnedMedia(id, userId);
         return Result.ok(checkpointService.loadPlan(
-                id, normalizeText(goal, "分析目标"), AnalysisMode.fromNullable(mode)));
+                id, normalizeText(goal, "分析目标"), AnalysisMode.fromRequest(mode)));
     }
 
     @GetMapping("/analysis-status")
@@ -173,40 +178,47 @@ public class AnalysisController {
             @RequestAttribute(AuthService.REQUEST_USER_ID) Long userId) {
         mediaService.requireOwnedMedia(id, userId);
         String normalizedGoal = normalizeText(goal, "分析目标");
-        return Result.ok(statusService.current(id, normalizedGoal, AnalysisMode.fromNullable(mode)));
+        return Result.ok(statusService.current(id, normalizedGoal, AnalysisMode.fromRequest(mode)));
     }
 
     @GetMapping(value = "/analysis-events", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public SseEmitter analysisEvents(
             @RequestParam Long id,
             @RequestParam String goal,
+            @RequestParam(required = false) String mode,
             @RequestAttribute(AuthService.REQUEST_USER_ID) Long userId) {
         mediaService.requireOwnedMedia(id, userId);
         String normalizedGoal = normalizeText(goal, "分析目标");
+        AnalysisMode analysisMode = AnalysisMode.fromRequest(mode);
         return taskEventService.subscribe(
                 id,
                 TaskEventService.ANALYSIS,
                 normalizedGoal,
-                statusService.current(id, normalizedGoal),
-                statusService.stage(id, normalizedGoal));
+                analysisMode,
+                statusService.current(id, normalizedGoal, analysisMode),
+                statusService.stage(id, normalizedGoal, analysisMode));
     }
 
     @GetMapping("/agent-evaluation")
     public Result<Map<String, Object>> agentEvaluation(
             @RequestParam Long id,
             @RequestParam String goal,
+            @RequestParam(required = false) String mode,
             @RequestAttribute(AuthService.REQUEST_USER_ID) Long userId) {
         mediaService.requireOwnedMedia(id, userId);
-        return Result.ok(evaluationService.evaluate(id, normalizeText(goal, "分析目标")));
+        return Result.ok(evaluationService.evaluate(
+                id, normalizeText(goal, "分析目标"), AnalysisMode.fromRequest(mode)));
     }
 
     @GetMapping("/agent-trace")
     public Result<Map<String, Object>> agentTrace(
             @RequestParam Long id,
             @RequestParam String goal,
+            @RequestParam(required = false) String mode,
             @RequestAttribute(AuthService.REQUEST_USER_ID) Long userId) {
         mediaService.requireOwnedMedia(id, userId);
-        return Result.ok(telemetry.latest(id, normalizeText(goal, "分析目标")));
+        return Result.ok(telemetry.latest(
+                id, normalizeText(goal, "分析目标"), AnalysisMode.fromRequest(mode)));
     }
 
     /**

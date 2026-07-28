@@ -65,6 +65,7 @@ CREATE TABLE IF NOT EXISTS failed_analysis_tasks (
     id BIGINT NOT NULL AUTO_INCREMENT,
     media_id BIGINT NOT NULL,
     action VARCHAR(32) NOT NULL,
+    mode VARCHAR(32) NOT NULL DEFAULT 'GENERAL',
     content_hash VARCHAR(128) NOT NULL,
     user_goal VARCHAR(500) NOT NULL,
     attempt_count INT NOT NULL,
@@ -77,3 +78,16 @@ CREATE TABLE IF NOT EXISTS failed_analysis_tasks (
     KEY idx_failed_analysis_status_time (status, created_at),
     KEY idx_failed_analysis_media (media_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+SET @failed_task_mode_column_exists = (
+    SELECT COUNT(1) FROM information_schema.columns
+    WHERE table_schema = DATABASE() AND table_name = 'failed_analysis_tasks' AND column_name = 'mode'
+);
+SET @failed_task_mode_column_sql = IF(
+    @failed_task_mode_column_exists = 0,
+    'ALTER TABLE failed_analysis_tasks ADD COLUMN mode VARCHAR(32) NOT NULL DEFAULT ''GENERAL'', ALGORITHM=INSTANT, LOCK=NONE',
+    'SELECT 1'
+);
+PREPARE failed_task_mode_column_statement FROM @failed_task_mode_column_sql;
+EXECUTE failed_task_mode_column_statement;
+DEALLOCATE PREPARE failed_task_mode_column_statement;

@@ -16,6 +16,8 @@ public record AgentFeedback(
         @Size(max = 500, message = "分析目标不能超过 500 字")
         String goal,
 
+        String mode,
+
         Integer rating,
 
         @Size(max = 64, message = "错误类型不能超过 64 字")
@@ -38,9 +40,14 @@ public record AgentFeedback(
         Instant createdAt
 ) {
     public AgentFeedback normalized() {
+        return normalized(AnalysisMode.fromNullable(mode));
+    }
+
+    public AgentFeedback normalized(AnalysisMode analysisMode) {
         return new AgentFeedback(
                 mediaId,
                 goal == null ? null : goal.trim(),
+                (analysisMode == null ? AnalysisMode.GENERAL : analysisMode).name(),
                 rating,
                 errorType == null ? null : errorType.trim(),
                 comment == null ? null : comment.trim(),

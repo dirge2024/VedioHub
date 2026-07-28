@@ -4,6 +4,10 @@ import com.example.server.dto.AnalysisMode;
 import com.example.server.dto.ModeClassification;
 import com.example.server.dto.RouteDecision;
 import com.example.server.utils.DeepSeekUtils;
+import org.redisson.api.RRateLimiter;
+import org.redisson.api.RateIntervalUnit;
+import org.redisson.api.RateType;
+import org.redisson.api.RedissonClient;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -27,11 +31,15 @@ import org.springframework.stereotype.Service;
 public class ModeRouter {
 
     private static final Logger log = LoggerFactory.getLogger(ModeRouter.class);
+    private static final int USER_ROUTES_PER_MINUTE = 10;
+    private static final int GLOBAL_ROUTES_PER_MINUTE = 60;
 
     private final DeepSeekUtils deepSeekUtils;
+    private final RedissonClient redissonClient;
 
-    public ModeRouter(DeepSeekUtils deepSeekUtils) {
+    public ModeRouter(DeepSeekUtils deepSeekUtils, RedissonClient redissonClient) {
         this.deepSeekUtils = deepSeekUtils;
+        this.redissonClient = redissonClient;
     }
 
     /**
@@ -50,8 +58,39 @@ public class ModeRouter {
             return new RouteDecision(mode, reason);
         } catch (Exception e) {
             // 路由失败绝不能拖垮分析:记录后回退通用模式,让任务照常进行。
-            log.warn("自动意图路由失败,回退 GENERAL。goal={}", goal, e);
+            log.warn("自动意图路由失败,回退 GENERAL。goalLength={}", goal.length(), e);
             return new RouteDecision(AnalysisMode.GENERAL, "意图识别暂不可用,已按通用模式分析");
+        }
+    }
+
+    /**
+     * 面向用户请求的路由入口。自动路由本身也会消耗一次模型调用，因此使用独立配额；
+     * 配额不足或 Redis 不可用时直接按 GENERAL 继续，不让增强能力拖垮主流程。
+     */
+    public RouteDecision route(String goal, Long userId) {
+        if (!tryAcquireQuota(userId)) {
+            return new RouteDecision(
+                    AnalysisMode.GENERAL, "自动路由当前繁忙,已按通用模式分析");
+        }
+        return route(goal);
+    }
+
+    private boolean tryAcquireQuota(Long userId) {
+        if (userId == null) return false;
+        try {
+            RRateLimiter userLimiter = redissonClient.getRateLimiter(
+                    "limit:ai:route:user:" + userId);
+            userLimiter.trySetRate(
+                    RateType.OVERALL, USER_ROUTES_PER_MINUTE, 1, RateIntervalUnit.MINUTES);
+            if (!userLimiter.tryAcquire()) return false;
+
+            RRateLimiter globalLimiter = redissonClient.getRateLimiter("limit:ai:route:global");
+            globalLimiter.trySetRate(
+                    RateType.OVERALL, GLOBAL_ROUTES_PER_MINUTE, 1, RateIntervalUnit.MINUTES);
+            return globalLimiter.tryAcquire();
+        } catch (RuntimeException e) {
+            log.warn("自动意图路由限流器不可用,回退 GENERAL。userId={}", userId, e);
+            return false;
         }
     }
 

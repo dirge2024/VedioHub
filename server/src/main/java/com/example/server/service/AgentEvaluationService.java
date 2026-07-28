@@ -2,6 +2,7 @@ package com.example.server.service;
 
 import com.example.server.dto.AgentFeedback;
 import com.example.server.dto.AgentState;
+import com.example.server.dto.AnalysisMode;
 import com.example.server.dto.AnalysisResult;
 import com.example.server.dto.VideoContext;
 import org.springframework.stereotype.Service;
@@ -23,12 +24,18 @@ public class AgentEvaluationService {
     }
 
     public Map<String, Object> evaluate(Long mediaId, String goal) {
+        return evaluate(mediaId, goal, AnalysisMode.GENERAL);
+    }
+
+    public Map<String, Object> evaluate(Long mediaId, String goal, AnalysisMode mode) {
+        AnalysisMode resolvedMode = mode == null ? AnalysisMode.GENERAL : mode;
         VideoContext context = checkpointService.loadContext(mediaId);
-        AgentState state = checkpointService.loadResult(mediaId, goal);
-        if (state == null) state = checkpointService.loadCriticState(mediaId, goal);
+        AgentState state = checkpointService.loadResult(mediaId, goal, resolvedMode);
+        if (state == null) state = checkpointService.loadCriticState(mediaId, goal, resolvedMode);
 
         List<AgentFeedback> feedback = checkpointService.loadFeedback(mediaId).stream()
                 .filter(item -> goal.equals(item.goal()) || goal.equals(item.correctedGoal()))
+                .filter(item -> AnalysisMode.fromNullable(item.mode()) == resolvedMode)
                 .toList();
 
         Map<String, Object> metrics = new LinkedHashMap<>(evaluate(context, state));

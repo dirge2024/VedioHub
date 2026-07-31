@@ -1188,32 +1188,32 @@ const handleAuth = async () => {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(authForm.value)
     })
-    const data = await res.json().catch(() => null)
-    if (!data) {
-      authMessage.value = res.ok ? '服务端返回异常，请稍后重试' : `请求失败（HTTP ${res.status}）`
+    if (!res.ok) {
+      authMessage.value = (await res.text()) || `请求失败（HTTP ${res.status}）`
       authError.value = true
       return
     }
-    if (data.code === 200) {
-      if (authMode.value === 'login') {
-        currentUser.value = data.userInfo
-        localStorage.setItem('user', JSON.stringify(data.userInfo))
-        setAuthToken(data.token)
-        closeAuthModal()
-        showMsg(`欢迎回来，${data.userInfo.nickname}`)
-        fetchList({ notify: true })
-      } else {
-        authMessage.value = '注册成功，账号密码已保留，直接点“立即登录”即可'
-        authError.value = false
-        setTimeout(() => switchAuthMode({ keepMessage: true }), 900)
-      }
-    } else {
-      authMessage.value = data.msg || '操作失败'
+    const data = await res.json().catch(() => null)
+    if (!data?.userInfo) {
+      authMessage.value = '服务端返回异常，请稍后重试'
       authError.value = true
+      return
+    }
+    if (authMode.value === 'login') {
+      currentUser.value = data.userInfo
+      localStorage.setItem('user', JSON.stringify(data.userInfo))
+      setAuthToken(data.token)
+      closeAuthModal()
+      showMsg(`欢迎回来，${data.userInfo.nickname}`)
+      fetchList({ notify: true })
+    } else {
+      authMessage.value = '注册成功，账号密码已保留，直接点“立即登录”即可'
+      authError.value = false
+      setTimeout(() => switchAuthMode({ keepMessage: true }), 900)
     }
   } catch (e) {
     console.error(e)
-    authMessage.value = '网络连接错误'
+    authMessage.value = e?.message || '网络连接错误'
     authError.value = true
   } finally {
     authLoading.value = false

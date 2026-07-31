@@ -1,4 +1,4 @@
-const API_BASE = (import.meta.env.VITE_API_BASE_URL || 'http://localhost:9090').replace(/\/$/, '')
+const API_BASE = (import.meta.env?.VITE_API_BASE_URL || '').replace(/\/$/, '')
 const TOKEN_KEY = 'authToken'
 
 export function hasAuthToken() {
@@ -27,8 +27,6 @@ export function clearAuthToken() {
  * response.body 流式读取）和音频下载等非 JSON 响应必须原样透传——一旦在这里把 body
  * 读掉，流式传输会直接失效。
  */
-const SUCCESS_CODE = 0
-
 // 以 code + message 判定信封，刻意不依赖 data 键：错误响应的 data 恒为 null，
 // 若后端将来配置了 non_null 序列化（data 键被省略），依赖 data 会让所有错误响应
 // 退回透传，用户就会看到整串原始 JSON。
@@ -46,23 +44,8 @@ function dataAsText(data) {
   return typeof data === 'string' ? data : JSON.stringify(data)
 }
 
-/**
- * 登录/注册的过渡适配：App.vue 目前仍按旧的 AuthResponse 结构判断
- * `data.code === 200`，并读取 data.userInfo / data.token / data.msg。
- * 这里把统一响应体还原成旧结构，避免为此改动正在并行开发中的 App.vue。
- * 待前端登录逻辑改读统一结构后，可以删掉这个分支。
- */
-function toLegacyAuthShape(envelope, status) {
-  if (envelope.code === SUCCESS_CODE) {
-    return { code: 200, msg: envelope.message, ...(envelope.data || {}) }
-  }
-  return { code: status, msg: envelope.message }
-}
-
-function unwrap(response, envelope, isAuthEndpoint) {
-  const payload = isAuthEndpoint
-    ? toLegacyAuthShape(envelope, response.status)
-    : (envelope.data ?? null)
+function unwrap(response, envelope) {
+  const payload = envelope.data ?? null
 
   return {
     ok: response.ok,
@@ -82,7 +65,13 @@ export async function apiRequest(path, options = {}) {
   const token = localStorage.getItem(TOKEN_KEY)
   if (token) headers.set('Authorization', `Bearer ${token}`)
 
-  const response = await fetch(`${API_BASE}${path}`, { ...options, headers })
+  let response
+  try {
+    response = await fetch(`${API_BASE}${path}`, { ...options, headers })
+  } catch (error) {
+    if (error?.name === 'AbortError') throw error
+    throw new Error('无法连接后端服务，请确认后端已启动且地址配置正确', { cause: error })
+  }
   if (response.status === 401 && !path.startsWith('/user/')) {
     clearAuthToken()
     window.dispatchEvent(new Event('auth-expired'))
@@ -101,6 +90,5 @@ export async function apiRequest(path, options = {}) {
   }
   if (!isEnvelope(envelope)) return response
 
-  const isAuthEndpoint = path.startsWith('/user/login') || path.startsWith('/user/register')
-  return unwrap(response, envelope, isAuthEndpoint)
+  return unwrap(response, envelope)
 }

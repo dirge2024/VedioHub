@@ -12,6 +12,11 @@ jobs:
         working-directory: server
     steps:
       - uses: actions/checkout@v4
+      - name: Validate deployment files
+        working-directory: .
+        run: |
+          bash -n scripts/dev-up.sh
+          docker compose --env-file .env.example config --quiet
       - uses: actions/setup-java@v4
         with:
           distribution: temurin

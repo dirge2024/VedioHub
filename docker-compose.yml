@@ -2,72 +2,85 @@ services:
   mysql:
     image: mysql:8.0
     ports:
-      - "3307:3306"
+      - "127.0.0.1:3307:3306"
     environment:
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?MYSQL_ROOT_PASSWORD is required}
       MYSQL_DATABASE: media_db
+      MYSQL_USER: ${MYSQL_APP_USER:-dovideo}
+      MYSQL_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD is required}
       TZ: Asia/Shanghai
     command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
     volumes:
       - ./mysql/data:/var/lib/mysql
-      - ./mysql/logs:/var/log/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -uroot -p$$MYSQL_ROOT_PASSWORD --silent"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 20s
 
   redis:
     image: redis:7.4-alpine
     ports:
-      - "6379:6379"
-    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:?REDIS_PASSWORD is required}
+      - "127.0.0.1:6379:6379"
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD is required}
+    command: ["sh", "-c", "exec redis-server --appendonly yes --requirepass \"$$REDIS_PASSWORD\""]
     volumes:
       - ./redis/data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
 
   qdrant:
-    image: qdrant/qdrant:latest
+    image: qdrant/qdrant:v1.18.2
     ports:
-      - "6333:6333"
+      - "127.0.0.1:6333:6333"
+    environment:
+      QDRANT__SERVICE__API_KEY: ${QDRANT_API_KEY:?QDRANT_API_KEY is required}
     volumes:
       - ./qdrant/data:/qdrant/storage
 
   minio:
-    image: minio/minio
+    image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z
     ports:
-      - "9000:9000"
-      - "9001:9001"
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
     environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?MINIO_ROOT_USER is required}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD is required}
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:?MINIO_ACCESS_KEY is required}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:?MINIO_SECRET_KEY is required}
     command: server /data --console-address ":9001"
     volumes:
       - ./minio/data:/data
 
   rmqnamesrv:
-    image: apache/rocketmq:5.3.2
+    image: apache/rocketmq:5.3.4
     ports:
-      - "9876:9876"
+      - "127.0.0.1:9876:9876"
     environment:
       JAVA_OPT_EXT: -server -Xms256m -Xmx256m -Xmn128m
     command: sh mqnamesrv
 
   rmqbroker:
-    image: apache/rocketmq:5.3.2
+    image: apache/rocketmq:5.3.4
     ports:
-      - "10911:10911"
-      - "10909:10909"
+      - "127.0.0.1:10911:10911"
+      - "127.0.0.1:10909:10909"
     environment:
       NAMESRV_ADDR: rmqnamesrv:9876
       BROKER_ID: 0
       BROKER_ROLE: ASYNC_MASTER
       JAVA_OPT_EXT: -server -Xms256m -Xmx256m -Xmn128m
     volumes:
-      - ./rocketmq/broker.conf:/home/rocketmq/rocketmq-5.3.2/conf/broker.conf
-    command: sh mqbroker -n rmqnamesrv:9876 -c /home/rocketmq/rocketmq-5.3.2/conf/broker.conf
+      - ./rocketmq/broker.conf:/home/rocketmq/broker.conf:ro
+      - rocketmq-store:/home/rocketmq/store
+      - rocketmq-logs:/home/rocketmq/logs
+    command: sh mqbroker -n rmqnamesrv:9876 -c /home/rocketmq/broker.conf
     depends_on:
       - rmqnamesrv
 
-  rmqdashboard:
-    image: apacherocketmq/rocketmq-dashboard:latest
-    ports:
-      - "8180:8082"
-    environment:
-      JAVA_OPTS: -Drocketmq.namesrv.addr=rmqnamesrv:9876
-    depends_on:
-      - rmqnamesrv
+volumes:
+  rocketmq-store:
+  rocketmq-logs:

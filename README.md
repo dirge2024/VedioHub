@@ -8,7 +8,7 @@
     <img src="https://img.shields.io/badge/Vue-3-42B883?style=flat-square" alt="Vue 3">
     <img src="https://img.shields.io/badge/MySQL-8-4479A1?style=flat-square" alt="MySQL 8">
     <img src="https://img.shields.io/badge/Redis-7-DC382D?style=flat-square" alt="Redis 7">
-    <img src="https://img.shields.io/badge/RocketMQ-5.3.2-D77310?style=flat-square" alt="RocketMQ 5.3.2">
+    <img src="https://img.shields.io/badge/RocketMQ-5.3.4-D77310?style=flat-square" alt="RocketMQ 5.3.4">
     <img src="https://img.shields.io/badge/LangChain4j-Agent-20232A?style=flat-square" alt="LangChain4j">
     <a href="./LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue?style=flat-square" alt="MIT License"></a>
   </p>
@@ -143,7 +143,7 @@ sequenceDiagram
 | :--- | :--- | :--- |
 | Web | Vue 3、Vite、SSE、Marked | 上传、Agent 工作台、实时进度与安全 Markdown 展示 |
 | API | Java 21、Spring Boot 3.5.9、Undertow、MyBatis-Plus | 鉴权、媒体管理、任务编排与 REST API |
-| 异步与缓存 | RocketMQ 5.3.2、Redis 7.4、Redisson | 异步削峰、状态缓存、限流、锁与消费幂等 |
+| 异步与缓存 | RocketMQ 5.3.4、Redis 7.4、Redisson | 异步削峰、状态缓存、限流、锁与消费幂等 |
 | 数据与存储 | MySQL 8、MinIO、Qdrant | 业务数据、视频对象、Checkpoint 与向量检索 |
 | 视频与 AI | FFmpeg、Tesseract、LangChain4j、DeepSeek、TeleSpeechASR、BGE-M3 | 音视频处理、多模态解析、Agent 推理与 Embedding |
 | 部署 | Docker Compose | 本地中间件编排 |
@@ -156,10 +156,20 @@ sequenceDiagram
 | :--- | :--- | :--- |
 | JDK | 21 | 后端运行环境 |
 | Node.js | 22 | Vue 与 Vite 构建环境 |
-| Docker | 支持 Compose | 启动 MySQL、Redis、MinIO、Qdrant 与 RocketMQ |
+| Docker | Compose v2 | 启动 MySQL、Redis、MinIO、Qdrant 与 RocketMQ |
 | FFmpeg | 可在终端调用 | 音频切分与关键帧抽取 |
 | Tesseract | 安装 `chi_sim` 与 `eng` | 中英文关键帧 OCR |
 | yt-dlp | 可选 | 仅解析在线视频链接时需要 |
+
+建议先确认命令均可用：
+
+```bash
+java -version
+node --version
+docker compose version
+ffmpeg -version
+tesseract --version
+```
 
 ### 1. 准备配置
 
@@ -167,17 +177,17 @@ sequenceDiagram
 cp .env.example .env
 ```
 
-编辑 `.env`，至少设置数据库、Redis、MinIO 密码和 `SILICONFLOW_API_KEY`。密钥只保存在本地 `.env`，不要提交到仓库。
+编辑 `.env`，至少替换数据库、Redis、MinIO、Qdrant 的示例密码并设置 `SILICONFLOW_API_KEY`。全新数据库中 `DB_USERNAME` 与 `MYSQL_APP_USER` 应保持一致；`MYSQL_ROOT_PASSWORD` 仅供数据库初始化使用。密钥只保存在本地 `.env`，不要提交到仓库。
 
 默认 LLM 为 `deepseek-ai/DeepSeek-V3.2`。历史示例模型 `deepseek-ai/DeepSeek-R1-Distill-Qwen-32B` 已被硅基流动禁用，会返回 `Model disabled`。`LLM_TIMEOUT_SECONDS` 默认是 `300`，用于避免长视频证据分析在模型响应尚未返回时过早超时；模型或超时配置变更后需要重启后端。
 
 ### 2. 启动中间件
 
 ```bash
-docker compose up -d
+./scripts/dev-up.sh
 ```
 
-Compose 会启动 MySQL、Redis、MinIO、Qdrant、RocketMQ NameServer、Broker 与 Dashboard。
+脚本会检查本机命令与版本、校验 Compose 配置，并等待 MySQL、Redis、MinIO、Qdrant 和 RocketMQ 启动。中间件与后端默认只监听 `127.0.0.1`，不会直接暴露到局域网；远程部署时再显式修改 `SERVER_ADDRESS` 并配置反向代理。
 
 ### 3. 启动后端
 
@@ -190,7 +200,13 @@ cd server
 ./mvnw spring-boot:run
 ```
 
-后端默认地址为 `http://localhost:9090`，启动时会初始化项目所需数据表。
+后端默认地址为 `http://localhost:9090`，启动时会初始化项目所需数据表。另开终端确认服务可用：
+
+```bash
+curl http://localhost:9090/health
+```
+
+成功时返回 `{"code":0,"message":"success","data":"UP"}`。
 
 ### 4. 启动前端
 
@@ -200,13 +216,31 @@ source .env
 set +a
 
 cd client
-npm install
+npm ci
 npm run dev
 ```
 
-浏览器访问 `http://localhost:5173`。
+浏览器访问 `http://localhost:5173`。开发环境默认通过 Vite 代理访问后端；后端地址不同时修改 `VITE_DEV_PROXY_TARGET`，前后端分开部署时再设置 `VITE_API_BASE_URL`。
 
 只查看前端 Agent 工作台时，可以打开 `http://localhost:5173/?demo`。Demo 模式使用内置示例数据，不依赖后端服务。
+
+### 常见问题
+
+| 现象 | 处理方式 |
+| :--- | :--- |
+| 后端无法连接 MySQL 或 Redis | 运行 `docker compose --env-file .env ps`，确认服务健康且 `.env` 密码一致 |
+| 页面提示无法连接后端 | 先访问 `/health`；再检查 `VITE_DEV_PROXY_TARGET` 或 `VITE_API_BASE_URL` |
+| 视频解析提示命令不存在 | 确认 `ffmpeg`、`tesseract` 可在终端执行，必要时配置 `FFMPEG_DIR`、`OCR_COMMAND` |
+| AI 接口返回 401 或模型不可用 | 检查 `SILICONFLOW_API_KEY` 与模型名称，修改后重启后端 |
+| Maven 提示 `maven-default-http-blocker` | 在 `server` 目录执行 `./mvnw -s .mvn/central-settings.xml spring-boot:run`，临时绕过失效的用户级镜像 |
+
+停止本地中间件：
+
+```bash
+docker compose --env-file .env down
+```
+
+该命令不会删除 `mysql/data`、`redis/data`、`minio/data`、`qdrant/data` 或 RocketMQ 命名卷。需要完全重置时请先备份，再使用 `docker compose --env-file .env down --volumes` 并手动清理这些数据目录。
 
 ## 目录结构
 

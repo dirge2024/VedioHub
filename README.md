@@ -2,7 +2,7 @@
   <h2>DoVideoAI</h2>
   
   <p>
-    <a href="https://github.com/Xiaoc7r/DOVideo-AI/stargazers"><img src="https://img.shields.io/github/stars/Xiaoc7r/DOVideo-AI?style=flat-square" alt="GitHub Stars"></a>
+    <a href="https://github.com/dirge2024/VedioHub/stargazers"><img src="https://img.shields.io/github/stars/dirge2024/VedioHub?style=flat-square" alt="GitHub Stars"></a>
     <img src="https://img.shields.io/badge/Java-21-E76F00?style=flat-square" alt="Java 21">
     <img src="https://img.shields.io/badge/Spring%20Boot-3.5.9-6DB33F?style=flat-square" alt="Spring Boot 3.5.9">
     <img src="https://img.shields.io/badge/Vue-3-42B883?style=flat-square" alt="Vue 3">
